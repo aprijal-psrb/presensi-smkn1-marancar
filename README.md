@@ -77,3 +77,4 @@ bukan kunci rahasia). Workflow CI men-decode-nya sebelum menandatangani APK.
 - [`docs/PANDUAN-SISWA.md`](docs/PANDUAN-SISWA.md) — satu halaman untuk siswa
 - [`docs/FITUR.md`](docs/FITUR.md) — fitur yang sudah & belum dikerjakan
 - [`docs/contoh-data-siswa.csv`](docs/contoh-data-siswa.csv) — contoh format impor
+- [`docs/ARSITEKTUR.md`](docs/ARSITEKTUR.md) — review arsitektur & rekomendasi
