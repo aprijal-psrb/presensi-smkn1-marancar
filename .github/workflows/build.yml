@@ -1,59 +1,48 @@
 name: Build APK
 
+# Trigger push diaktifkan setelah seluruh berkas sumber selesai diunggah.
 on:
-  push:
-    branches: [ main ]
   workflow_dispatch:
 
 permissions:
-  contents: write     # untuk membuat Release + unggah APK
-  issues: write       # untuk melaporkan log bila build gagal
+  contents: write
+  issues: write
 
 jobs:
   build:
     runs-on: ubuntu-latest
     timeout-minutes: 30
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
       - name: Siapkan JDK 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
-
       - name: Siapkan Gradle 8.7
         uses: gradle/actions/setup-gradle@v3
         with:
           gradle-version: '8.7'
-
       - name: Pulihkan kunci tanda tangan
         run: |
           mkdir -p app/keystore
           base64 -d app/keystore/presensi.p12.b64 > app/keystore/presensi.p12
-          ls -l app/keystore/
-
       - name: Build APK rilis
         run: |
           set -o pipefail
           gradle :app:assembleRelease --no-daemon --stacktrace 2>&1 | tee build-log.txt
-
       - name: Siapkan berkas APK
         run: |
           mkdir -p dist
-          cp app/build/outputs/apk/release/app-release.apk \
-             "dist/Presensi-SMKN1-Marancar-v1.0.apk"
+          cp app/build/outputs/apk/release/app-release.apk "dist/Presensi-SMKN1-Marancar-v1.0.apk"
           ls -lh dist
-
       - name: Unggah artefak build
         uses: actions/upload-artifact@v4
         with:
           name: apk-presensi
           path: dist/*.apk
           retention-days: 90
-
       - name: Buat Release berisi APK
         uses: softprops/action-gh-release@v2
         with:
@@ -61,26 +50,14 @@ jobs:
           name: Presensi SMKN 1 Marancar v1.0.${{ github.run_number }}
           body: |
             APK siap pasang (Android 10 ke atas).
-
-            Cara pasang: unduh `Presensi-SMKN1-Marancar-v1.0.apk` di bawah,
-            buka di HP, izinkan "Instal dari sumber tidak dikenal", lalu pasang.
-
-            Panduan: lihat folder `docs/` di repositori.
+            Unduh berkas di bawah, buka di HP, izinkan "Instal dari sumber tidak dikenal", lalu pasang.
+            Panduan lengkap ada di folder `docs/` repositori ini.
           files: dist/*.apk
           fail_on_unmatched_files: true
-
-      # Bila build gagal, log 200 baris terakhir dibuat sebagai Issue
-      # supaya mudah diperiksa dari jarak jauh.
       - name: Laporkan kegagalan build
         if: failure()
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          if [ -f build-log.txt ]; then
-            tail -n 250 build-log.txt > err.txt
-          else
-            echo "Tidak ada log build." > err.txt
-          fi
-          gh issue create \
-            --title "Build gagal (run #${{ github.run_number }})" \
-            --body-file err.txt || true
+          if [ -f build-log.txt ]; then tail -n 250 build-log.txt > err.txt; else echo "Tidak ada log build." > err.txt; fi
+          gh issue create --title "Build gagal (run #${{ github.run_number }})" --body-file err.txt || true
