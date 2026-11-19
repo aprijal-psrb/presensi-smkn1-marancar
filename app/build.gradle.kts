@@ -4,7 +4,7 @@ plugins {
 }
 
 // Kunci tanda tangan: file .p12 hasil decode dari keystore/presensi.p12.b64
-// (dibuat oleh workflow CI, lihat .github/workflows/build.yml)
+// (dibuat otomatis oleh workflow CI, lihat .github/workflows/build.yml)
 val kunciRilis = file("keystore/presensi.p12")
 
 android {
@@ -17,7 +17,6 @@ android {
         targetSdk = 34
         versionCode = 1
         versionName = "1.0"
-        resourceConfigurations += listOf("in", "id")   // aplikasi berbahasa Indonesia
     }
 
     signingConfigs {
@@ -34,7 +33,7 @@ android {
 
     buildTypes {
         release {
-            isMinifyEnabled = false      // kode kecil & tanpa obfuscation agar mudah diaudit sekolah
+            isMinifyEnabled = false      // tanpa obfuscation agar mudah diaudit sekolah
             if (kunciRilis.exists()) signingConfig = signingConfigs.getByName("rilis")
         }
     }
