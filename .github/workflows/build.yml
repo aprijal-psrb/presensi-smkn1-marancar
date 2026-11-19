@@ -1,48 +1,57 @@
 name: Build APK
 
-# Trigger push diaktifkan setelah seluruh berkas sumber selesai diunggah.
 on:
+  push:
+    branches: [ main ]
   workflow_dispatch:
 
 permissions:
-  contents: write
-  issues: write
+  contents: write     # membuat Release + unggah APK
+  issues: write       # melaporkan log bila build gagal
 
 jobs:
   build:
     runs-on: ubuntu-latest
     timeout-minutes: 30
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
       - name: Siapkan JDK 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
+
       - name: Siapkan Gradle 8.7
         uses: gradle/actions/setup-gradle@v3
         with:
           gradle-version: '8.7'
+
       - name: Pulihkan kunci tanda tangan
         run: |
           mkdir -p app/keystore
           base64 -d app/keystore/presensi.p12.b64 > app/keystore/presensi.p12
+
       - name: Build APK rilis
         run: |
           set -o pipefail
           gradle :app:assembleRelease --no-daemon --stacktrace 2>&1 | tee build-log.txt
+
       - name: Siapkan berkas APK
         run: |
           mkdir -p dist
           cp app/build/outputs/apk/release/app-release.apk "dist/Presensi-SMKN1-Marancar-v1.0.apk"
           ls -lh dist
+
       - name: Unggah artefak build
         uses: actions/upload-artifact@v4
         with:
           name: apk-presensi
           path: dist/*.apk
           retention-days: 90
+
       - name: Buat Release berisi APK
         uses: softprops/action-gh-release@v2
         with:
@@ -54,6 +63,9 @@ jobs:
             Panduan lengkap ada di folder `docs/` repositori ini.
           files: dist/*.apk
           fail_on_unmatched_files: true
+
+      # Bila build gagal, 250 baris log terakhir dibuat sebagai Issue
+      # supaya bisa diperiksa tanpa membuka tab Actions.
       - name: Laporkan kegagalan build
         if: failure()
         env:
