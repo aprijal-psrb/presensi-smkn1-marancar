@@ -1,0 +1,12 @@
+*.iml
+.gradle/
+local.properties
+build/
+app/build/
+.idea/
+dist/
+build-log.txt
+err.txt
+
+# kunci tanda tangan hasil decode (yang di-commit hanya versi .b64)
+app/keystore/presensi.p12
