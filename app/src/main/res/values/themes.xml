@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.Presensi" parent="Theme.Material3.DayNight.NoActionBar">
+        <item name="colorPrimary">@color/hijau</item>
+        <item name="colorOnPrimary">@color/putih</item>
+        <item name="colorPrimaryContainer">@color/hijau_muda</item>
+        <item name="colorOnPrimaryContainer">@color/hijau_tua</item>
+        <item name="colorSecondary">@color/hijau</item>
+        <item name="android:statusBarColor">@color/hijau</item>
+        <item name="android:navigationBarColor">@color/bg</item>
+        <item name="android:windowBackground">@color/bg</item>
+    </style>
+
+    <style name="JudulLayar">
+        <item name="android:textSize">22sp</item>
+        <item name="android:textStyle">bold</item>
+        <item name="android:textColor">@color/hijau_tua</item>
+    </style>
+
+    <style name="TeksKecil">
+        <item name="android:textSize">13sp</item>
+        <item name="android:textColor">@color/abu</item>
+    </style>
+
+    <style name="TeksBiasa">
+        <item name="android:textSize">15sp</item>
+        <item name="android:textColor">@color/hitam</item>
+    </style>
+</resources>
