@@ -39,28 +39,34 @@ object Waktu {
     fun akhirHari(ms: Long): Long = awalHari(ms) + 86_400_000L - 1
 }
 
+/** Penyeragam penulisan agar "XI TKJ 1", "XI  TKJ  1" dan " XI TKJ 1 " dianggap sama. */
+object Rapi {
+
+    /** Nama kelas: tanpa spasi tepi, spasi ganda dirapatkan jadi satu. */
+    fun kelas(s: String): String = s.trim().replace(Regex("\\s+"), " ")
+
+    /** NISN: hanya angka & huruf, tanpa spasi. */
+    fun nisn(s: String): String = s.trim().replace(" ", "")
+}
+
 /** Utilitas jaringan: mencari alamat IP lokal HP guru. */
 object Jaringan {
 
     /**
-     * Ambil IPv4 lokal (Wi-Fi / hotspot). Diurutkan agar Wi-Fi didahulukan,
-     * karena biasanya siswa terhubung lewat Wi-Fi yang sama.
+     * Ambil IPv4 lokal yang paling mungkin dijangkau siswa.
+     *
+     * URUTAN PENTING (perbaikan v1.1): mode hotspot (ap*/swlan*) didahulukan
+     * di atas wlan*, karena bila guru menyalakan hotspot SEKALIGUS tersambung
+     * ke Wi-Fi sekolah, alamat wlan* tidak bisa dijangkau siswa hotspot.
      */
     fun ipLokal(): String {
         try {
             val semua = NetworkInterface.getNetworkInterfaces()?.toList().orEmpty()
-            val urut = semua.sortedByDescending { nif ->
-                val n = nif.name.lowercase(Locale.ROOT)
-                when {
-                    n.startsWith("wlan") -> 3
-                    n.startsWith("ap") || n.startsWith("swlan") || n.startsWith("rndis") -> 2
-                    else -> 1
-                }
-            }
+            val urut = semua.sortedByDescending { nif -> prioritas(nif.name) }
             for (nif in urut) {
                 if (!nif.isUp || nif.isLoopback) continue
                 for (alamat in nif.inetAddresses.toList()) {
-                    if (alamat is Inet4Address && !alamat.isLoopbackAddress && alamat.isSiteLocalAddress) {
+                    if (alamat is Inet4Address && layak(alamat)) {
                         return alamat.hostAddress ?: continue
                     }
                 }
@@ -68,6 +74,38 @@ object Jaringan {
         } catch (_: Exception) {
         }
         return "127.0.0.1"
+    }
+
+    /**
+     * Alamat dasar server untuk QR, mis. "http://192.168.43.1:8787".
+     * Null bila HP tidak terhubung ke jaringan mana pun yang bisa dijangkau siswa —
+     * lebih baik menolak membuat QR daripada menampilkan QR yang pasti gagal.
+     */
+    fun alamatServer(port: Int): String? {
+        if (port <= 0) return null
+        val ip = ipLokal()
+        if (ip == "127.0.0.1") return null
+        return "http://$ip:$port"
+    }
+
+    private fun prioritas(nama: String): Int {
+        val n = nama.lowercase(Locale.ROOT)
+        return when {
+            n.startsWith("ap") || n.startsWith("swlan") -> 6   // hotspot bawaan HP
+            n.startsWith("wlan1") || n.startsWith("wlan2") -> 5
+            n.startsWith("rndis") || n.startsWith("usb") -> 4    // tethering kabel
+            n.startsWith("wlan") -> 3
+            n.startsWith("eth") -> 2
+            else -> 1
+        }
+    }
+
+    /** Hanya alamat privat yang wajar dipakai jaringan sekolah. */
+    private fun layak(a: Inet4Address): Boolean {
+        if (a.isLoopbackAddress || a.isLinkLocalAddress) return false
+        val ip = a.hostAddress ?: return false
+        if (ip.startsWith("169.254.")) return false   // link-local: tidak akan terjangkau
+        return a.isSiteLocalAddress
     }
 }
 

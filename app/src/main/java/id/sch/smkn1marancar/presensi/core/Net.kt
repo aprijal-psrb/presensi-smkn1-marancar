@@ -5,8 +5,21 @@ import java.io.IOException
 import java.net.HttpURLConnection
 import java.net.URL
 
-/** Galat komunikasi dengan HP guru, membawa pesan siap tampil ke siswa. */
-class NetGagal(pesan: String, val kode: Int = 0) : IOException(pesan)
+/**
+ * Galat komunikasi dengan HP guru.
+ *
+ * [kode]    : kode HTTP (0 bila gagal di tingkat jaringan/timeout).
+ * [status]  : status dari JSON server, mis. SESI_DITUTUP / TIDAK_VALID / ROSTER_KOSONG.
+ * [permanen]: true untuk 4xx — mengulang kiriman tidak akan pernah berhasil.
+ */
+class NetGagal(
+    pesan: String,
+    val kode: Int = 0,
+    val status: String = ""
+) : IOException(pesan) {
+
+    val permanen: Boolean get() = kode in 400..499
+}
 
 /**
  * Klien HTTP kecil untuk HP siswa.
@@ -43,7 +56,11 @@ object Net {
             val teks = aliran?.bufferedReader()?.use { it.readText() }.orEmpty()
             val json = if (teks.isBlank()) JSONObject() else JSONObject(teks)
             if (kode !in 200..299) {
-                throw NetGagal(json.optString("pesan", "Server menolak (kode $kode)"), kode)
+                throw NetGagal(
+                    pesan = json.optString("pesan", "Server menolak (kode $kode)"),
+                    kode = kode,
+                    status = json.optString("status", "")
+                )
             }
             return json
         } finally {
