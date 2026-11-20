@@ -15,8 +15,8 @@ android {
         applicationId = "id.sch.smkn1marancar.presensi"
         minSdk = 29          // Android 10 (Q) — sesuai target perangkat sekolah
         targetSdk = 34
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = 2      // v1.1: perbaikan P0 (outbox, roster, alamat QR)
+        versionName = "1.1"
     }
 
     signingConfigs {

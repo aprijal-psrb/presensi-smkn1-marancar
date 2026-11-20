@@ -25,6 +25,10 @@ import id.sch.smkn1marancar.presensi.core.Waktu
  *
  * QR berisi alamat http://<ip-hp-guru>:<port>/s/<token>. Token hanya hidup
  * selama sesi ini terbuka; "Ganti QR" membuat token baru sehingga QR lama mati.
+ *
+ * Perbaikan v1.1: alamat dihitung ulang tiap 1,5 detik. Bila IP berubah
+ * (hotspot mati-nyala), QR otomatis diperbarui dan guru diberi tahu —
+ * supaya layar tidak terus menampilkan alamat yang sudah mati.
  */
 class QrSessionActivity : AppCompatActivity() {
 
@@ -105,17 +109,7 @@ class QrSessionActivity : AppCompatActivity() {
             if (terlambat > 0) append(" • $terlambat terlambat")
         }
 
-        val port = app.portServer()
-        if (port > 0) {
-            val alamat = "http://${Jaringan.ipLokal()}:$port/s/${sesi.token}"
-            txtAlamat.text = alamat
-            if (alamat != isiQrTerakhir) {
-                imgQr.setImageBitmap(Qr.buat(alamat))
-                isiQrTerakhir = alamat
-            }
-        } else {
-            txtAlamat.text = "Server belum aktif — tutup lalu buka ulang sesi."
-        }
+        perbaruiQr()
 
         txtKode.text = "Kode manual: ${sesi.kode}"
 
@@ -128,6 +122,26 @@ class QrSessionActivity : AppCompatActivity() {
         }
 
         tampilkanDaftar()
+    }
+
+    /** Hitung ulang alamat & gambar QR; perbarui bila IP berubah. */
+    private fun perbaruiQr() {
+        val alamat = Jaringan.alamatServer(app.portServer())
+        if (alamat == null) {
+            txtAlamat.text = "HP ini belum terhubung ke hotspot/Wi-Fi. " +
+                "Nyalakan hotspot atau sambungkan Wi-Fi, QR akan muncul sendiri."
+            return
+        }
+
+        val penuh = "$alamat/s/${sesi.token}"
+        txtAlamat.text = penuh
+        if (penuh == isiQrTerakhir) return
+
+        imgQr.setImageBitmap(Qr.buat(penuh))
+        if (isiQrTerakhir.isNotEmpty()) {
+            Toast.makeText(this, "Alamat berubah — QR diperbarui.", Toast.LENGTH_SHORT).show()
+        }
+        isiQrTerakhir = penuh
     }
 
     private fun tampilkanDaftar() {
