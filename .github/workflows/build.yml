@@ -42,7 +42,7 @@ jobs:
       - name: Siapkan berkas APK
         run: |
           mkdir -p dist
-          cp app/build/outputs/apk/release/app-release.apk "dist/Presensi-SMKN1-Marancar-v1.0.apk"
+          cp app/build/outputs/apk/release/app-release.apk "dist/Presensi-SMKN1-Marancar-v1.1.apk"
           ls -lh dist
 
       - name: Unggah artefak build
@@ -55,11 +55,18 @@ jobs:
       - name: Buat Release berisi APK
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v1.0.${{ github.run_number }}
-          name: Presensi SMKN 1 Marancar v1.0.${{ github.run_number }}
+          tag_name: v1.1.${{ github.run_number }}
+          name: Presensi SMKN 1 Marancar v1.1.${{ github.run_number }}
           body: |
             APK siap pasang (Android 10 ke atas).
             Unduh berkas di bawah, buka di HP, izinkan "Instal dari sumber tidak dikenal", lalu pasang.
+
+            **Perbaikan v1.1** (dari review docs/ARSITEKTUR.md):
+            - Kehadiran yang gagal terkirim TIDAK lagi dibuang diam-diam; siswa diberi tahu bila ditolak.
+            - QR memakai alamat hotspot yang benar dan diperbarui otomatis bila IP berubah.
+            - Kelas tanpa daftar siswa tidak bisa dibuka; isian nama bebas di HP siswa dihapus.
+            - Nama kelas diseragamkan saat impor Excel (spasi ganda tidak lagi memecah kelas).
+
             Panduan lengkap ada di folder `docs/` repositori ini.
           files: dist/*.apk
           fail_on_unmatched_files: true
