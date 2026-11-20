@@ -1,172 +1,109 @@
-# Review Arsitektur v1.0 — Presensi SMKN 1 Marancar
+# Review Arsitektur — Presensi SMKN 1 Marancar (v1.0)
 
-Tanggal: 20 Nov 2026. Dasar: commit `e160a95` pada branch `main`.
-
-**Yang dibaca:** `Db.kt`, `SessionServer.kt`, `App.kt`, `StudentScanActivity.kt`, `ImporSiswa.kt`, `Util.kt`.
-
-**Yang tidak dibaca:** `Net.kt`, model `Siswa`/`Sesi`/`Absen`, layar guru, `AndroidManifest.xml`, `build.gradle`. Temuan yang bergantung pada berkas tersebut ditandai **asumsi** dan wajib diverifikasi.
-
-Angka siswa per rombel: ±200 siswa dibagi 9 rombel ≈ **22 siswa per rombel** (dihitung dari data proyek).
-
----
+Tanggal review: 2026-11-20 · Cabang: `main` · Cakupan baca: 6 berkas inti (`Db.kt`, `SessionServer.kt`, `App.kt`, `StudentScanActivity.kt`, `ImporSiswa.kt`, `Util.kt`).
 
 ## 1. Ringkasan arsitektur saat ini
 
+Satu APK, dua peran. HP guru menjalankan **NanoHTTPD (port 8787)** di dalam foreground service dan menjadi satu-satunya "server". HP siswa memindai QR berisi `http://<ip-guru>:<port>/s/<token>` lalu `POST /api/absen`. Tidak ada VPS dan tidak ada Google Sheets — sumber kebenaran adalah SQLite di HP guru, ditulis lebih dulu sebelum ditampilkan/diekspor (`App.kt`).
+
 ```
- HP GURU (server)                                   HP SISWA (klien)
-+------------------------------------------+       +---------------------------+
-| Layar guru: Nama, Mapel, Kelas           |       | Pindai QR (kamera)        |
-|  -> Db.bukaSesi: token 96 bit, kode 6    |  QR   |  presensi://absen?u=URL   |
-| App.mulaiServer: NanoHTTPD 8787..8796    |------>|                           |
-| SessionServer:                           |       | GET  /api/sesi?token=     |
-|   GET /s/{token}, /api/sesi, /api/roster |<------| GET  /api/roster?token=   |
-|   POST /api/absen                        | HTTP  | POST /api/absen           |
-| SQLite presensi.db: sesi, absen, roster  |  LAN  | Outbox (SQLite) bila gagal|
-+------------------------------------------+hotspot+---------------------------+
+HP GURU (foreground service)                    HP SISWA (±200, ~22/rombel)
+┌──────────────────────────────────┐            ┌──────────────────────────────────┐
+│ Activity Guru                    │            │ StudentScanActivity              │
+│  buka sesi → token 96-bit +      │            │  pindai QR / kode manual 6 huruf │
+│  kode 6 huruf → tampilkan QR     │            │  identitas: SharedPreferences    │
+│        │                         │            │  outbox: SQLite lokal            │
+│        ▼                         │  Wi-Fi /   │        │                         │
+│ SQLite presensi.db               │  hotspot   │        ▼                         │
+│  sesi · absen (UNIQUE            │  sekolah   │  GET  /api/sesi, /api/roster    │
+│  sesi,nisn) · roster             │◄───────────┤  POST /api/absen {token,nisn}   │
+│        ▲ semua fungsi            │            │  gagal jaringan → outbox        │
+│        │ @Synchronized           │            │  → kirim ulang otomatis         │
+│ SessionServer (NanoHTTPD)        │            └──────────────────────────────────┘
+│  :8787 (naik +1 s.d. +9 bila     │
+│  port sibuk)                     │
+└──────────────────────────────────┘
 ```
 
-Alur:
-1. Guru mengisi nama, mapel, dan kelas. `Db.bukaSesi` membuat `token` (12 byte acak, 96 bit, `SecureRandom`) dan `kode` (6 karakter dari 32 huruf/angka). Sesi aktif sebelumnya ditutup otomatis.
-2. `App.mulaiServer` menyalakan NanoHTTPD di port 8787. Bila port terpakai, mencoba 8788 sampai 8796.
-3. QR berisi `presensi://absen?u=<URL terenkode>`. URL berbentuk `http://<IP>:<port>/s/<token>`.
-4. Siswa memindai. Aplikasi memanggil `GET /api/sesi`, lalu `GET /api/roster` bila identitas belum tersimpan, memilih nama, mengetik NISN, dan mengirim `POST /api/absen`.
-5. Server menulis ke tabel `absen` dengan `UNIQUE(sesi, nisn)`. Bila jaringan gagal, aplikasi siswa menyimpan POST ke tabel `outbox`.
+Alur data: scan → `GET /api/sesi` (validasi token, tahu kelas) → pilih nama dari roster / pakai identitas tersimpan → `POST /api/absen` → validasi token aktif + NISN terdaftar di kelas → `INSERT ... CONFLICT_IGNORE` (UNIK `sesi,nisn`) → status HADIR/TERLAMBAT dihitung dari jam HP guru (toleransi default 15 menit).
 
-Kontrak endpoint yang ada di kode:
+**Yang sudah benar dan layak dipertahankan:** tulis-ke-SQLite-dulu (tahan mati listrik/proses); `UNIQUE(sesi,nisn)` + `CONFLICT_IGNORE` = mustahil dobel; rotasi token saat ganti QR/tutup sesi (QR lama mati); jam server sebagai acuan status terlambat; nama diambil dari roster, bukan ketikan siswa; kolom `absen` denormalisasi (nama/kelas/mapel/guru disalin saat dicatat — aman dari perubahan roster); impor Excel dalam transaksi atomik; token `SecureRandom` 96-bit.
 
-| Endpoint | Autentikasi | Sukses | Galat |
-|---|---|---|---|
-| `GET /s/{token}` | token | HTML | HTML pesan, status 200 |
-| `GET /api/sesi?token=` atau `?kode=` | token atau kode | `ok`, `sesi`, `tercatat` | 409 `TIDAK_VALID`, 409 `SESI_DITUTUP` |
-| `GET /api/roster?token=` | token | `ok`, `kelas`, `siswa[{nisn,nama}]` | 409 tanpa `status` |
-| `POST /api/absen` | token atau kode di body | `ok`, `status` (`BARU`/`SUDAH`), `nama`, `tercatat` | 409 `TIDAK_VALID`, 409 `SESI_DITUTUP`, 409 `NISN_TIDAK_COCOK`, 400 NISN/nama kosong, 500 galat |
-| `GET /api/ping` | tidak ada | `ok`, `aplikasi` | — |
-
-Yang sudah benar:
-- `UNIQUE(sesi, nisn)` dengan `CONFLICT_IGNORE` mencegah absen dobel.
-- Token dan kode dibuat dengan `SecureRandom`.
-- Ganti QR dan penutupan sesi langsung membatalkan token lama.
-- Nama diambil dari roster, bukan dari isian siswa (bila roster ada).
-- Absen ditulis ke SQLite sebelum server menjawab. Setiap INSERT berjalan sebagai transaksi sendiri (autocommit).
-
----
+**Asumsi dan ketidakpastian (eksplisit):**
+- Activity/layanan guru (pembuatan QR, layar daftar hadir, foreground service), `Net.kt`, model data, manifest, dan `build.gradle` **tidak dibaca** dalam review ini; perilakunya disimpulkan dari konteks dan ditandai asumsi.
+- NanoHTTPD dipakai dengan konstruktor bawaan → default `DefaultAsyncRunner`: **satu thread baru per koneksi (paralel di lapisan HTTP)**. Versi pustaka tidak diverifikasi.
+- Angka kinerja di bawah adalah **estimasi teoretis, bukan hasil pengukuran**.
+- Nama antarmuka jaringan hotspot berbeda antar merek Android (`wlan0` mode AP vs `ap0`/`swlan0`); banyak HP membatasi klien hotspot pada kisaran 8–10 perangkat (belum diuji).
 
 ## 2. Temuan
 
-Risiko: **T** = Tinggi, **S** = Sedang, **R** = Rendah.
+| # | Gejala di lapangan | Penyebab teknis | Risiko | Berkas/fungsi |
+|---|--------------------|-----------------|--------|---------------|
+| T1 | Titip absen lewat NISN teman: siswa A memindai QR, memilih nama teman B, mengetik NISN B → B tercatat HADIR tanpa hadir; satu siswa bisa "menitipkan" beberapa teman sekali jalan | `/api/absen` hanya memvalidasi NISN terdaftar di kelas. NISN bukan rahasia: tercetak di dokumen sekolah, diketahui teman sekelas, dan endpoint `/api/roster` membagikan pasangan nama–NISN seluruh kelas ke siapa pun yang memegang token. Pengecekan NISN di HP siswa (`tanyaNisn`) membandingkan isian dengan roster yang sudah diunduh HP itu sendiri — bukan bukti identitas. Identitas tersimpan plaintext + tombol "Ganti identitas" terbuka. Tidak ada PIN, tidak ada pengikat perangkat | **Tinggi** | `SessionServer.apiRoster/apiAbsen`, `StudentScanActivity.pilihNama/tanyaNisn/konfirmasiGantiIdentitas`, `Util.Identitas` |
+| T2 | Jalur isian nama bebas bila roster kelas kosong (fail-open): kelas yang belum diimpor, atau ejaan kelas sesi ≠ ejaan kelas Excel (mis. "XI TKJ 1" vs "XI tkj 1" — perbandingan biner `kelas = ?`) → siswa atau siapa pun di jaringan dapat mengirim nama+NISN bebas dan diterima | `apiAbsen`: bila `cariSiswa()==null` DAN `jumlahSiswaKelas(kelas)==0`, nama dari klien dipakai apa adanya. Dialog `tanyaNamaManual` juga isian bebas. Tidak ada normalisasi nama kelas | **Tinggi** | `SessionServer.apiAbsen`, `Db.cariSiswa/jumlahSiswaKelas`, `StudentScanActivity.tanyaNamaManual` |
+| T3 | QR menunjuk IP yang tidak terjangkau siswa: siswa terhubung hotspot guru tapi terus "Tidak bisa menghubungi HP guru"; muncul saat guru ikut Wi-Fi sekolah sambil menyalakan hotspot, atau saat hotspot mati-nyala (IP berubah) dan QR lama masih dipakai | `Jaringan.ipLokal()` mengurutkan `wlan*` **di atas** `ap*/swlan*` → bila dua antarmuka hidup, QR memakai IP `wlan` (subnet Wi-Fi sekolah) yang tidak terjangkau klien hotspot. Alamat QR dibekukan saat dibuat; halaman `/s/` memanggil `ipLokal()` ulang per permintaan, QR statis tidak. Batas klien hotspot (~8–10 di banyak HP) bisa membuat sebagian siswa tak bisa bergabung sama sekali | **Tinggi** | `Util.Jaringan.ipLokal`, `SessionServer.halaman`, activity guru (QR) |
+| T4 | Outbox siswa dibuang diam-diam saat sesi ditutup: jaringan buruk saat scan → UI berjanji "aman, akan dikirim otomatis" → guru menutup sesi → kirim ulang ditolak 409 → baris outbox **dihapus tanpa jejak dan tanpa kabar** | `flushAntrian()`: `NetGagal → hapusAntrian(id)` — asumsi `Net.kirim` melempar `NetGagal` untuk semua respons `ok=false`, termasuk 409 `SESI_DITUTUP`/`TIDAK_VALID` dan 500 (galat sementara ikut terbuang). Tidak ada status di UI, tidak ada TTL. URL outbox memuat IP lama — bila IP guru berubah, antrean mengejar alamat mati selamanya | **Tinggi** | `StudentScanActivity.flushAntrian/kirim`, `Db.hapusAntrian` |
+| T5 | Aplikasi guru dimatikan paksa di tengah sesi: semua scan siswa mendadak gagal (masuk outbox); setelah HP hidup lagi, sesi lama masih berstatus terbuka ("zombie", `ditutup IS NULL`) — bila server ikut menyala, QR/token lama masih bisa menerima absen tanpa pengawasan | Server hanya hidup selama proses; `sesiAktif()` mengembalikan sesi zombie; tidak ada alur "lanjutkan/tutup?" saat aplikasi menyala kembali (asumsi — layar guru tidak dibaca). Catatan: absen yang **sudah masuk** tetap aman (SQLite-first, autocommit per INSERT) — ini risiko operasional, bukan kehilangan data | Sedang | `App.mulaiServer/hentikanServer`, `Db.sesiAktif/bukaSesi` |
+| T6 | Impor Excel menggantikan seluruh roster: setelah impor ulang dengan berkas berbeda, siswa yang tak ada di berkas baru ditolak saat scan; ejaan kelas bergeser → roster kelas "kosong" → memicu jalur T2; tidak ada konfirmasi/pratinjau sebelum menghapus | `Db.imporRoster`: `DELETE FROM roster` lalu insert semua (replace-all). Duplikat `kelas\|nisn` dalam berkas diabaikan senyap. Riwayat `absen` **tidak** rusak — denormalisasi menyelamatkannya | Sedang | `Db.imporRoster`, `ImporSiswa.ubahKeSiswa` |
+| T7 | Konkurensi & kinerja saat 200 siswa serentak: lonjakan scan 1–3 menit pertama — jawaban lambat/antre, sebagian timeout di sisi siswa (masuk outbox, masih selamat, tapi bisa terkena T4) | NanoHTTPD bawaan = **thread per koneksi (paralel)**, TAPI semua fungsi `Db` ber-`@Synchronized` pada satu objek → eksekusi basis data **berurutan lewat satu kunci global**. Tiap `POST /api/absen` memegang kunci 4×: `sesiByToken → cariSiswa → catat → hitungStatus`; `hitungStatus` menjalankan `GROUP BY` atas `absen WHERE sesi=?` **tanpa indeks kolom `sesi`** (hanya `idx_absen_waktu`) → pemindaian penuh yang membesar seiring riwayat, dipanggil pada SETIAP absen. Estimasi (bukan ukuran): 1–5 ms per operasi → antrean puncak ±1–2 detik untuk 200 POST — dapat diterima. Tidak ada batas ukuran badan permintaan, rate-limit, maupun jumlah koneksi (backlog socket default Java 50 — asumsi) | Sedang | `Db` (`@Synchronized`, `hitungStatus`, `catat`), `SessionServer.serve`, `App.mulaiServer` (`start(5_000, false)`) |
+| T8 | Server terbuka tanpa autentikasi di jaringan sekolah: perangkat apa pun yang melihat QR (diproyeksikan di depan kelas) dapat mengunduh seluruh nama+NISN kelas (`/api/roster`), menandai hadir siswa mana pun (T1), membanjiri server. Header `Access-Control-Allow-Origin: *` memungkinkan halaman web di perangkat yang sama memanggil API via JavaScript; kode 6 huruf (32⁶ ≈ 1,07×10⁹ ≈ 2³⁰ kombinasi) terlihat di layar dan bisa ditebak tanpa batas | Token 96-bit kuat secara kriptografis, tetapi **bukan rahasia** — terlihat di layar kelas dan dipakai bersama; HTTP polos tanpa TLS; tanpa rate-limit; asumsi server mendengar di 0.0.0.0 sehingga juga terjangkau dari Wi-Fi sekolah. Deep link `presensi://absen?u=<URL>` dari halaman web diterima tanpa pemeriksaan host (asumsi activity exported+BROWSABLE — manifest tidak dibaca) | **Tinggi** (integritas + privasi) | `SessionServer.serve/apiRoster/apiAbsen/json`, `StudentScanActivity.keUrl/onCreate` |
+| T9 | Data pribadi siswa plaintext: nama+NISN+kehadiran siswa di bawah 18 tahun tersimpan SQLite tanpa enkripsi di HP guru dan HP siswa, terkirim HTTP polos — relevan bagi kewajiban pengendali data menurut UU PDP No. 27/2022 (perlu diverifikasi ke teks resmi sebelum dijadikan dasar kebijakan; **tidak diverifikasi dalam review ini**) | `presensi.db` berkas biasa; identitas siswa di `SharedPreferences` plaintext; seluruh transmisi HTTP; `allowBackup` belum diverifikasi | Sedang | `Db` (presensi.db), `Util.Identitas`, `SessionServer` (HTTP) |
+| T10 | Jam & data lain: absen lewat outbox dicatat TERLAMBAT meski scan tepat waktu (jam server saat diterima, bukan saat scan); siswa dengan NISN kehilangan nol depan ditolak (sel xlsx numerik dibaca tanpa format); rekap terpotong diam-diam (`rekap` LIMIT 20000, `ringkasanSesi` LIMIT 300 — terpotong setelah ~17/~6 hari efektif tanpa filter); `onUpgrade` kosong (VERSI=1, tanpa jalur migrasi) | `Db.catat` memakai `System.currentTimeMillis()` server saat menerima; `ImporSiswa.pecahSheet` membaca `<v>` numerik apa adanya; LIMIT tetap tanpa paginasi/peringatan | Sedang–Rendah | `Db.catat/rekap/ringkasanSesi/onUpgrade`, `ImporSiswa` |
 
-### Risiko Tinggi
+**Port 8787 bentrok (Rendah):** `App.mulaiServer` mencoba 8788…8796 lalu menyerah (-1); QR memakai port aktual (perilaku benar), hanya hint contoh alamat di input kode manual tetap `8787`. Dua guru paralel di jaringan yang sama tidak bentrok (IP berbeda).
 
-| No | Gejala di lapangan | Penyebab teknis | Berkas / fungsi |
+## 3. Rekomendasi (berprioritas)
+
+| Prioritas | Apa yang dilakukan | Berkas terkena | Dampak bila tidak dikerjakan |
 |---|---|---|---|
-| T1 | Satu siswa bisa mencatat hadir untuk teman sekelasnya. Foto QR dari dalam ruangan cukup untuk dikirim ke teman. | `apiRoster` mengembalikan NISN dan nama seluruh kelas. Satu-satunya syarat adalah token, yang ada di QR. Pengecekan NISN di HP (`tanyaNisn`) membandingkan isian dengan data roster yang sudah diterima HP itu sendiri, jadi tidak menambah bukti identitas. `apiAbsen` hanya mengecek NISN ada di roster. NISN tidak rahasia: tercantum di dokumen sekolah dan diketahui teman sekelas. Tidak ada PIN, tidak ada ikatan perangkat. | `SessionServer.apiRoster`, `apiAbsen`; `StudentScanActivity.pilihNama`, `tanyaNisn` |
-| T2 | Siswa melihat "Jaringan bermasalah. Kehadiranmu aman dan akan dikirim otomatis", lalu baris outbox dihapus saat sesi sudah ditutup atau QR sudah diganti. Kehadiran tidak tercatat dan siswa tidak diberi tahu. | `flushAntrian` menghapus baris pada setiap `NetGagal`. **Asumsi:** `Net.kirim` melempar `NetGagal` untuk semua respons `ok=false`, termasuk 409 `SESI_DITUTUP`, 409 `TIDAK_VALID`, dan 500. Kasus 500 juga menghapus baris. Komentar kode menyebut "ditolak permanen", tetapi kondisi itu tidak dibedakan dari galat sementara. | `StudentScanActivity.flushAntrian`; `Db.hapusAntrian` |
-| T3 | Siswa memindai QR, lalu muncul "Tidak bisa menghubungi HP guru". | `Jaringan.ipLokal` mengurutkan antarmuka `wlan*` paling depan. Bila HP guru tersambung ke Wi-Fi sekolah (`wlan0`) sambil menyalakan hotspot (`ap0`, `swlan0`, `wlan1`, atau `rndis`), IP yang dipakai adalah IP Wi-Fi sekolah. Siswa di hotspot tidak bisa mencapainya. QR yang sudah tampil membawa IP lama. Bila hotspot mati-nyala, IP bisa berubah (bergantung merek HP; belum diuji), dan QR lama menunjuk alamat yang salah. | `Util.kt` `Jaringan.ipLokal`; `SessionServer.halaman` |
-| T4 | Sebagian siswa tidak bisa masuk hotspot saat satu rombel (±22 siswa) hadir bersamaan. | **Dugaan, belum diuji:** banyak HP Android membatasi jumlah klien hotspot pada kisaran 8–10 (nilai pasti bergantung merek dan versi). Tidak ada kode yang mengatur atau mendeteksi batas ini. | Keputusan hotspot; `App.mulaiServer` |
-| T5 | Sebagian HP siswa menampilkan "Tidak bisa menghubungi" meski sudah tersambung ke hotspot guru. | **Dugaan, belum dibuktikan.** Hotspot guru tidak punya internet. Android dapat menganggap Wi-Fi itu tanpa internet dan memakai data seluler sebagai jaringan default. Socket yang tidak diikat ke Wi-Fi lalu mengirim ke `192.168.x.x` lewat jalur yang salah. Aplikasi siswa tidak mengikat koneksi ke Wi-Fi. | `StudentScanActivity.proses`, `kirim`, `flushAntrian`; `Net.kt` (asumsi) |
-| T6 | Setelah impor ulang Excel, rombel lain tidak lagi diverifikasi NISN-nya, dan nama diisi HP siswa. | `Db.imporRoster` menghapus **seluruh** tabel `roster`, lalu menulis ulang dari berkas. Berkas yang hanya berisi satu rombel menghapus rombel lain. Di `apiAbsen`, bila `jumlahSiswaKelas` = 0, pengecekan NISN dilewati dan nama diambil dari HP siswa. Riwayat absen tidak ikut hilang karena tabel `absen` menyimpan salinan nama dan kelas. Tidak ada pratinjau atau riwayat impor. | `Db.imporRoster`; `SessionServer.apiAbsen`; `ImporSiswa.ubahKeSiswa` |
-| T7 | Data kehadiran hilang bila data aplikasi dihapus, HP guru rusak, atau HP diganti. | Semua data hanya di SQLite lokal HP guru. Tidak ada ekspor atau cadangan. Status `allowBackup` belum diverifikasi (manifest tidak dibaca). | `App.kt`; keputusan "data hanya di HP guru" |
+| **P0-1** | **Tutup jalur isian bebas (fail-closed).** Bila roster kelas sesi kosong → tolak dengan status baru `ROSTER_KOSONG`, jangan terima nama dari klien; tolak pembukaan sesi untuk kelas yang rosternya kosong; hapus dialog isian nama/NISN bebas; normalisasi nama kelas (trim/spasi ganda) | `SessionServer.apiAbsen`, `Db.bukaSesi`/layar guru, `StudentScanActivity.tanyaNamaManual` | T2: siapa pun di jaringan dapat mencatat NISN+nama fiktif — jaminan "nama dari roster" hangus |
+| **P0-2** | **NISN + PIN per siswa (anti titip absen minimal).** PIN 6 digit dicetak wali kelas, disimpan sebagai hash di HP guru; 5 percobaan salah per siswa → kunci sampai guru buka (kebijakan sekolah). Hapus NISN penuh dari `/api/roster` (tampilkan tersamar `••••43`). PIN yang dibagikan siswa ke teman tetap mungkin — diterima sadar atau ditangani aturan sekolah | `Db` (kolom `pin_hash`), `SessionServer.apiRoster/apiAbsen`, `StudentScanActivity.tanyaNisn` | T1: satu HP bisa mencatat seluruh kelas; data kehadiran tidak dapat dipertanggungjawabkan |
+| **P0-3** | **QR selalu menunjuk alamat yang hidup.** Saat hotspot aktif, dahulukan antarmuka `ap*/swlan*` (bukan `wlan`); hitung alamat sekali saat sesi dibuka dan simpan di tabel `sesi`; pantau perubahan IP saat QR ditampilkan → perbarui QR (token/kode tetap, tampilkan tombol "Perbarui QR"); tolak start server bila tak ada IP jangkauan; tampilkan IP+nama antarmuka di layar guru | `Util.Jaringan.ipLokal`, `Db.bukaSesi`, activity guru, `SessionServer.halaman` | T3: kelas terhenti "tidak bisa menghubungi HP guru" justru pada mode paling sering dipakai (hotspot) |
+| **P0-4** | **Outbox transparan, tidak dibuang senyap.** Hapus baris hanya bila jawaban final sukses (`BARU`/`SUDAH`); `SESI_DITUTUP`/`TIDAK_VALID` → status "gagal" ditampilkan permanen ke siswa ("beri tahu guru untuk absen manual"); 500/timeout → tetap antre dengan jeda naik; layar guru menampilkan penghitung scan tertunda per sesi; pastikan `Net.kirim` tidak melempar `NetGagal` untuk galat sementara | `StudentScanActivity.flushAntrian/kirim/tampilAntri`, `Db.outbox` (kolom status), `Net.kt` | T4: kehadiran hilang senyap sementara UI berjanji "aman" — merusak kepercayaan siswa dan rekap |
+| **P0-5** | **Uji lapangan sebelum dipakai harian.** Satu HP guru + ±22 HP siswa per rombel (catat merek/Android, batas klien hotspot), plus 200 POST dalam ~10 detik dari PC di jaringan yang sama. Hasilnya menentukan: satu hotspot cukup / dua hotspot per rombel / Wi-Fi sekolah tanpa isolasi klien | Tidak mengubah kode; alat uji terpisah | T3/T7: sesi gagal di hari pertama tanpa diketahui penyebabnya (angka saat ini estimasi) |
+| **P1-1** | Batas laju & permintaan: tolak badan > 32 KB; 10 percobaan kode/menit per IP (balas 429 status `RATE_LIMIT` — kontrak baru); dengarkan hanya antarmuka hotspot/Wi-Fi sekolah, bukan 0.0.0.0; tolak sumber di luar subnet lokal | `SessionServer.serve`, `App.mulaiServer` | T8: tebakan kode tanpa batas; satu perangkat nakal membanjiri HP guru hingga kelas tak bisa absen |
+| **P1-2** | Deep link & CORS: tautan luar hanya diterima bila host IP privat RFC 1918 dan port cocok; konfirmasi sebelum kirim; hapus pengiriman otomatis dari `onCreate`; hapus `Access-Control-Allow-Origin: *` dari endpoint roster; verifikasi `exported`/BROWSABLE di manifest | `StudentScanActivity.keUrl/onCreate/prosesIsi`, `SessionServer.json`, `AndroidManifest.xml` | T8: NISN+nama terkirim ke host sembarang via tautan web |
+| **P1-3** | Waktu scan: kirim `waktu_scan` dari HP siswa; server simpan `waktu_scan` + `waktu_terima`, status dihitung dari `waktu_scan`; tandai bila selisih > 5 menit (ambang diuji) | `SessionServer.apiAbsen`, `Db.catat`, `StudentScanActivity.kirim` | Siswa tepat waktu tercatat TERLAMBAT karena outbox (T10) |
+| **P1-4** | Impor roster dengan pratinjau: ringkasan sebelum menerapkan (+n baru, −n hilang, kelas berganti ejaan); konfirmasi bila >10% siswa akan hilang; impor per kelas (hanya kelas yang ada di berkas); simpan riwayat impor; NISN wajib 10 digit TEXT (tolak + daftar baris salah) | `Db.imporRoster`, `ImporSiswa`, UI impor | T6: satu berkas Excel salah → siswa tak bisa absen / memicu T2, tanpa jalan kembali |
+| **P1-5** | Cadangan terjadwal: ekspor otomatis CSV/JSON (`absen`+`sesi`) tiap sesi ditutup atau tiap hari ke folder Download via SAF; tampilkan tanggal cadangan terakhir di layar guru; ingatkan guru di akhir hari | Activity rekap/guru, `Db` | HP guru hilang/rusak = seluruh riwayat kehadiran sekolah hilang |
+| **P1-6** | Pemulihan sesi setelah mati paksa: saat aplikasi guru menyala dan ada sesi zombie, tawarkan "Lanjutkan (server ikut nyala, token tetap) / Tutup sesi"; pastikan foreground service + WakeLock parsial selama sesi aktif; uji 45 menit layar mati | `App.mulaiServer`, activity guru, `Db.sesiAktif` | T5: sesi zombie menerima absen tanpa pengawasan, atau scan siswa menggantung tanpa penjelasan |
+| **P1-7** | Kunci mode guru dengan PIN lokal (hash); migrasi DB: isi `onUpgrade` langkah per versi + tabel `meta(versi)` | Layar guru, `App`, `Db.onUpgrade` | Siapa pun yang memegang HP guru bisa buka sesi/lihat data (batasan sadar); pembaruan berikutnya bisa merusak data lama |
+| **P1-8** | Paginasi rekap/ringkasan + tampilkan jumlah total | `Db.rekap/ringkasanSesi`, layar rekap | Laporan terpotong diam-diam setelah beberapa hari efektif (T10) |
+| **P2-1** | Indeks basis data: `CREATE INDEX idx_absen_sesi ON absen(sesi);` dan `idx_sesi_token ON sesi(token)` via `onUpgrade` (VERSI 2) | `Db` | `hitungStatus` per absen melambat sepanjang semester — belum kritis pada ±200 siswa |
+| **P2-2** | Enkripsi & minimisasi data anak: SQLCipher/enkripsi berkas DB; identitas siswa keluar dari SharedPreferences plaintext; simpan hanya yang perlu; susun formulir persetujuan wali (UU PDP No. 27/2022 — verifikasi teks resmi dulu) | `Db`, `Util.Identitas` | Pencurian HP guru = kebocoran data pribadi anak (T9) |
+| **P2-3** | Transport aman opsional: HTTPS self-signed per HP guru dengan **sidik jari sertifikat dibenamkan di QR** — aplikasi siswa memverifikasi sidik jari (bukan CA), menghapus risiko penyadapan/permintaan palsu di Wi-Fi sekolah | `SessionServer`, pembuat QR, `Net` | Lalu lintas nama+NISN tetap terbaca di jaringan (T9) — diterima sadar untuk v1.0 |
+| **P2-4** | Kebersihan kecil: escape HTML pada `guru/mapel/kelas` di `bingkai`; ganti `e.message` dengan pesan galat umum; hint port manual dari port aktif; bungkus `bukaSesi` dalam satu transaksi; parser CSV menangani tanda kutip; deteksi header CSV/Excel lebih ketat (sinonim terbatas, cocok persis) | `SessionServer.bingkai/serve`, `StudentScanActivity.tanyaKodeManual`, `Db.bukaSesi`, `ImporSiswa` | Perbaikan kosmetik; masing-masing dampak kecil |
 
-### Risiko Sedang
+## 4. Jalur evolusi (tanpa meninggalkan v1.0)
 
-| No | Gejala di lapangan | Penyebab teknis | Berkas / fungsi |
-|---|---|---|---|
-| S1 | 200 siswa memindai hampir bersamaan: sebagian ditolak atau timeout. | **Paralel di lapisan HTTP.** **Asumsi:** NanoHTTPD 2.x dengan `DefaultAsyncRunner` memakai satu thread per koneksi tanpa batas. **Berurutan di lapisan data.** Semua method `Db` memakai `@Synchronized` pada satu objek, jadi INSERT dan SELECT antre. Estimasi (belum diukur): satu INSERT 1–5 ms, sehingga 200 POST selesai dalam orde ratusan milidetik. Batas nyata ada di backlog socket (default Java 50, asumsi) dan timeout baca 5 detik. Siswa yang menerima galat 500 masuk outbox lalu terkena T2. | `App.mulaiServer` (`start(5_000, false)`); semua fungsi `Db` |
-| S2 | Server bisa dipakai siapa pun di jaringan yang sama. Tebakan kode 6 huruf dapat dicoba tanpa batas. | Tidak ada autentikasi di luar token dan kode. Tidak ada rate limit. Ruang kode: 32^6 = 1.073.741.824. Estimasi: 500 percobaan/detik selama 45 menit = 1,35 × 10^6 percobaan, sekitar 0,13% dari ruang kode. Token 96 bit tidak praktis ditebak. **Asumsi:** server mendengar di semua antarmuka (0.0.0.0), sehingga juga terjangkau dari Wi-Fi sekolah bila HP guru tersambung ke sana. | `SessionServer.apiAbsen`, `apiSesi`; `App.mulaiServer` |
-| S3 | Tautan `presensi://absen?u=http://...` dari halaman web langsung mengirim NISN dan nama siswa ke host itu. | `keUrl` hanya memeriksa skema. `onCreate` menerima extra `url` tanpa pemeriksaan. `proses` mengirim tanpa konfirmasi, asalkan identitas sudah tersimpan. **Asumsi:** activity diekspor dengan kategori BROWSABLE (manifest belum diverifikasi). | `StudentScanActivity.keUrl`, `onCreate`, `prosesIsi` |
-| S4 | Setelah aplikasi guru dimatikan paksa, QR mati. Baris sesi tetap `ditutup = NULL`, sehingga sesi lama tercatat masih aktif. | `Db` menutup sesi hanya lewat `tutupSesi`. Tidak ada pemulihan saat aplikasi dibuka. Absen yang sudah diterima aman karena autocommit. Siswa yang gagal kirim tetap ada di outbox. Apakah server hidup kembali otomatis bergantung pada layar guru (tidak dibaca). | `App.kt`; `Db.bukaSesi`, `tutupSesi`, `sesiAktif` |
-| S5 | Layar guru mati lalu absen gagal, atau server berhenti di tengah sesi. | Tidak ada WakeLock di `App.mulaiServer`. Layanan latar (foreground service, sesuai keputusan) belum terlihat di berkas yang dibaca. Doze dan pembatasan baterai bisa menghentikan server. | `App.mulaiServer`; layanan guru (tidak dibaca) |
-| S6 | Siswa yang absen lewat outbox dicatat "TERLAMBAT" padahal memindai tepat waktu. | `Db.catat` memakai `System.currentTimeMillis()` saat server menerima, bukan saat siswa memindai. Outbox yang dikirim 10 menit kemudian ikut terkena. | `SessionServer.apiAbsen`; `Db.catat` |
-| S7 | Kode 6 huruf dari layar guru bisa dipakai siswa yang tidak memindai QR, termasuk orang yang melihat layar atau menerima kode dari teman. | `apiSesi` dan `apiAbsen` memakai `sesiByToken(token) ?: sesiByKode(kode)`, sehingga kode menjadi jalur kedua yang sah. Kode lebih mudah bocor daripada token: bisa dibaca dari layar, difoto, atau diketik. Kode hanya 6 karakter, jadi S2 lebih berisiko lewat jalur ini. Tidak ada cara mematikan jalur kode saja. | `SessionServer.apiSesi`, `apiAbsen`; `Db.sesiByKode`; `StudentScanActivity.tanyaKodeManual` |
-| S8 | Siswa dengan NISN yang kehilangan nol di depan tidak bisa lolos cek NISN di HP. | Sel angka di xlsx dibaca sebagai teks `<v>` tanpa format, sehingga nol depan hilang. Tidak ada validasi panjang atau format NISN. | `ImporSiswa.pecahSheet`, `ubahKeSiswa`; `StudentScanActivity.tanyaNisn` |
-| S9 | Kelas "XI TKJ 1" dan "XI tkj 1" dianggap dua rombel. Sesi dengan nama yang tidak persis sama tidak punya roster, lalu lolos tanpa cek NISN. | `rosterKelas`, `cariSiswa`, `jumlahSiswaKelas` memakai `kelas = ?` (perbandingan biner, peka huruf dan spasi). Tidak ada normalisasi. | `Db.cariSiswa`, `rosterKelas`, `jumlahSiswaKelas` |
-| S10 | Siapa pun bisa membuka mode guru, menjalankan server palsu, dan membagikan QR-nya. Layar "Tercatat ✓" di HP siswa bisa dipakai sebagai bukti palsu. | Satu APK dengan dua peran tanpa PIN atau kunci. Data palsu hanya ada di HP pembuat server palsu. Daftar hadir resmi tetap di HP guru asli. | Layar guru (tidak dibaca); keputusan dua peran |
-| S11 | Rekap dan ringkasan diam-diam terpotong. | `Db.rekap` membatasi 20.000 baris. `ringkasanSesi` membatasi 300 sesi. Hitungan (asumsi 6 sesi per rombel per hari, 22 siswa per rombel, 9 rombel, 200 hari efektif): rekap tanpa filter penuh setelah ±17 hari sekolah (9 × 6 × 22 = 1.188 baris/hari). Rekap satu kelas penuh setelah ±150 hari sekolah (6 × 22 = 132 baris/hari). Ringkasan tanpa filter penuh setelah ±6 hari sekolah (54 sesi/hari). | `Db.rekap`, `ringkasanSesi` |
-| S12 | Versi aplikasi berikutnya bisa merusak data lama. | `onUpgrade` kosong dan `VERSI = 1`. Belum ada jalur migrasi. | `Db.kt` |
+v1.0 tetap bekerja offline di kelas. Evolusi menuju dashboard wakasek tidak perlu mengubah peran HP guru:
 
-### Risiko Rendah
+1. **Fase A (termurah):** ekspor terjadwal (P1-5); guru menyerahkan CSV/JSON ke wakasek untuk dilihat di Excel. Tanpa server baru.
+2. **Fase B (v1.x):** setiap absen punya `id_absen` (UUID) + `diubah` (timestamp) + `perangkat_id` — keputusan skema yang harus diambil **sekarang** karena menentukan migrasi. Satu komputer sekolah (PC/minipc) menjalankan *collector* sederhana; HP guru mengunggah **delta** (JSON: sesi + baris `absen` baru sejak unggahan terakhir) saat terhubung Wi-Fi sekolah, dengan UPSERT berdasarkan `id_absen` (idempoten, tidak menggandakan data). HP guru tetap sumber kebenaran saat kelas berjalan; unggahan best-effort dengan antrean ulang (pola outbox).
+3. **Fase C (v2):** dashboard wakasek membaca collector. Baru setelah itu dipikirkan login pusat, verifikasi GPS, verifikasi wajah, Play Integrity — keputusan desain terpisah, jangan dicampurkan ke v1.0 (Play Integrity membutuhkan backend verifikasi; v1.0 tidak punya).
 
-| No | Gejala di lapangan | Penyebab teknis | Berkas / fungsi |
-|---|---|---|---|
-| R1 | Hint port manual di layar siswa menunjuk 8787, padahal server aktif di port lain. | QR memakai port aktif, tetapi `tanyaKodeManual` menulis contoh tetap `8787`. Bentrok port di HP guru jarang terjadi. | `App.mulaiServer`; `StudentScanActivity.tanyaKodeManual` |
-| R2 | Kolom Excel salah terbaca, misalnya "Nama Ayah" terpilih sebagai nama siswa. | Deteksi memakai `contains("nama")` dan mengambil kolom pertama yang cocok. | `ImporSiswa.ubahKeSiswa` |
-| R3 | Nama di CSV yang memakai tanda kutip dan koma di dalamnya terpotong. | `pecahCsv` memisah pada koma tanpa memperhatikan tanda kutip. | `ImporSiswa.pecahCsv` |
-| R4 | Nama guru atau mapel yang berisi HTML tampil apa adanya di halaman siswa. Pesan galat internal ikut terkirim. CORS `*` berlaku pada semua JSON. | `bingkai` tidak melakukan escape. `serve` mengirim `e.message`. `json` menambah `Access-Control-Allow-Origin: *`. | `SessionServer.bingkai`, `serve`, `json` |
-| R5 | Absen masuk ke sesi yang baru ditutup dalam milidetik. `bukaSesi` juga tidak memakai transaksi, sehingga crash di tengah bisa menyisakan dua sesi terbuka. | `apiAbsen` membaca sesi lalu mencatat dalam dua langkah. `bukaSesi` menjalankan UPDATE dan INSERT terpisah. | `SessionServer.apiAbsen`; `Db.bukaSesi` |
+Prinsip semua fase: aplikasi kelas **tidak boleh bergantung** pada ketersediaan collector; collector hanya menyalin, tidak memutuskan.
+
+Keputusan skema yang harus diambil sekarang karena menentukan evolusi: PIN per siswa (P0-2), `id_absen`+`diubah`+`perangkat_id` (Fase B), `waktu_scan` (P1-3).
+
+## 5. Batasan yang diterima sadar (v1.0)
+
+- Data kehadiran hanya tersimpan di HP guru; HP hilang/rusak/diganti = hilang (dimitigasi murah oleh P1-5).
+- Tidak ada login guru: siapa pun yang memegang HP guru dapat membuka sesi dan melihat data.
+- Tidak ada cadangan otomatis ke luar HP.
+- HTTP tanpa TLS di jaringan lokal sekolah; token/kode terlihat di layar kelas.
+- Anti-curang mengandalkan kewaspadaan guru (daftar hadir di layar) + NISN (dan PIN bila P0-2 dikerjakan); tanpa GPS, tanpa biometrik, tanpa Play Integrity — APK modifikasi/root/emulator tidak terdeteksi.
+- Outbox siswa best-effort: tidak menjamin kehadiran masuk bila sesi ditutup lebih dulu.
+- Semua jam mengandalkan jam HP (server = HP guru), tidak disinkronkan ke sumber waktu otoritatif.
+- Absen hanya bisa dari jaringan yang sama dengan HP guru: titip absen dari luar sekolah tidak mungkin, dari dalam ruangan tetap mungkin (T1).
+
+## 6. Ringkasan untuk pemilik proyek
+
+1. **T1** — `/api/roster` membagikan nama+NISN seluruh kelas dan NISN bukan rahasia, sehingga satu HP bisa mencatat kehadiran teman-temannya.
+2. **T4** — outbox siswa menghapus kehadiran yang gagal dikirim saat sesi sudah ditutup, tanpa memberi tahu siswa yang diberi janji "aman dan akan dikirim otomatis".
+3. **T3** — QR memakai IP Wi-Fi bila guru online di Wi-Fi sekolah sambil menyalakan hotspot, dan IP bisa berubah saat hotspot mati-nyala, sehingga QR menunjuk alamat mati.
+
+Rekomendasi: **P0 = 5, P1 = 8, P2 = 4**. Dokumen terunggah di `docs/ARSITEKTUR.md` pada branch `main` (commit "docs: review arsitektur v1.0").
 
 ---
-
-## 3. Rekomendasi
-
-### P0: wajib sebelum dipakai harian
-
-| No | Yang dilakukan | Berkas | Dampak bila tidak dikerjakan |
-|---|---|---|---|
-| R0-1 | Ganti verifikasi NISN dengan **NISN + PIN per siswa**. PIN 6 digit dicetak di kartu oleh wali kelas dan disimpan sebagai hash di HP guru. Batasi 5 percobaan salah per siswa, lalu kunci siswa itu sampai guru membuka kunci (kebijakan lintas sesi, perlu diputuskan sekolah). Hapus NISN dari respons `/api/roster`. Pemberian PIN harus dilakukan sebelum sistem dipakai, karena skema roster bergantung padanya. PIN yang dibagikan siswa tetap bisa dipakai teman; ini risiko yang harus diterima atau ditangani lewat aturan sekolah. | `SessionServer.apiRoster`, `apiAbsen`; `StudentScanActivity.tanyaNisn`; `Db` (kolom `pin_hash`) | T1: satu HP bisa mencatat seluruh kelas. |
-| R0-2 | Outbox hanya menghapus baris bila hasilnya final dan sukses (`BARU`/`SUDAH`). Untuk `SESI_DITUTUP` dan `TIDAK_VALID`, pindahkan baris ke status "gagal" dan tampilkan ke siswa: "Belum tercatat, sesi sudah ditutup." Untuk 500 dan timeout, tetap antre dengan jeda naik. Pastikan `Net.kt` tidak melempar `NetGagal` untuk galat sementara. | `StudentScanActivity.flushAntrian`, `kirim`; `Db` (kolom `status`, `alasan`) | T2: kehadiran hilang diam-diam sementara siswa mengira sudah aman. |
-| R0-3 | Hitung alamat hotspot sekali saat sesi dibuka, lalu simpan di tabel `sesi` (kolom `alamat`). Pilih antarmuka hotspot secara eksplisit dan tampilkan IP beserta nama antarmuka di layar guru sebelum QR. Sediakan tombol "Perbarui QR". Tolak start server bila tidak ada IP hotspot. | `Util.kt` `Jaringan.ipLokal`; `SessionServer.halaman`; `Db.bukaSesi` | T3: QR menunjuk alamat yang salah saat guru memakai Wi-Fi sekolah. |
-| R0-4 | Uji lapangan dengan satu HP guru dan ±22 HP siswa per rombel. Catat merek, versi Android, dan batas klien hotspot. Uji juga 200 POST dalam 10 detik. Hasilnya menentukan: (a) satu hotspot cukup, (b) dua hotspot per rombel, atau (c) Wi-Fi sekolah tanpa isolasi klien. | Tidak ada kode. Tambahkan pencatatan waktu di `App.mulaiServer` dan `apiAbsen` untuk uji. | T4 dan S1: sesi gagal di hari pertama tanpa diketahui penyebabnya. |
-| R0-5 | Di HP siswa, minta jaringan Wi-Fi dengan `ConnectivityManager.requestNetwork(TRANSPORT_WIFI)`. Kirim semua permintaan ke IP lokal lewat `Network.socketFactory`. Uji dengan data seluler aktif dan hotspot tanpa internet. Bila dugaan T5 tidak terbukti, rekomendasi ini bisa diturunkan ke P1. | `StudentScanActivity.proses`, `kirim`, `flushAntrian`; `Net.kt` | T5: sebagian siswa gagal absen, dan penyebabnya sulit dilacak. |
-
-### P1: penting, sebelum semester berikutnya
-
-| No | Yang dilakukan | Berkas | Dampak bila tidak dikerjakan |
-|---|---|---|---|
-| R1-1 | Dengarkan hanya di antarmuka hotspot atau Wi-Fi sekolah, bukan 0.0.0.0. Tolak permintaan yang alamat sumbernya di luar subnet lokal. | `App.mulaiServer`; `SessionServer.serve` | S2: server terbuka di jaringan sekolah. |
-| R1-2 | Batasi percobaan kode 6 huruf: 10 per menit per IP. Balas 429 dengan status `RATE_LIMIT` (kontrak baru). | `SessionServer.apiAbsen`, `apiSesi` | S2: tebakan kode tanpa batas. |
-| R1-3 | Tautan dari luar (deep link, extra `url`) hanya diterima bila host adalah IP privat RFC 1918 dan port cocok. Tampilkan konfirmasi sebelum mengirim. Hapus pengiriman otomatis dari `onCreate`. Verifikasi `exported` dan BROWSABLE di manifest. | `StudentScanActivity.keUrl`, `onCreate`, `prosesIsi`; `AndroidManifest.xml` | S3: NISN dan nama terkirim ke host sembarang. |
-| R1-4 | Impor per kelas dengan pratinjau: tampilkan jumlah siswa per kelas, minta konfirmasi, lalu ganti hanya kelas yang ada di berkas. Simpan riwayat impor (waktu, jumlah, hash berkas). Normalisasi nama kelas (trim, spasi ganda, huruf besar). | `Db.imporRoster`; `ImporSiswa.ubahKeSiswa` | T6, S9: roster hilang dan kelas tidak cocok. |
-| R1-5 | Tolak pembukaan sesi untuk kelas yang rosternya kosong. Hapus cabang fallback yang menerima NISN apa pun. | `SessionServer.apiAbsen`; `Db.bukaSesi` atau layar guru | T6: absen tanpa verifikasi. |
-| R1-6 | Simpan NISN sebagai TEXT. Saat impor, tolak baris yang NISN-nya bukan 10 digit dan tampilkan daftarnya. Panjang NISN 10 digit perlu dicek ke data sekolah. | `ImporSiswa.pecahSheet`, `ubahKeSiswa`; `StudentScanActivity.tanyaNisn` | S8: siswa tidak bisa absen karena nol depan hilang. |
-| R1-7 | Kirim `waktu_scan` dari HP siswa. Server menyimpan `waktu_terima` dan `waktu_scan`. Status dihitung dari `waktu_scan`. Tandai bila selisihnya lebih dari 5 menit (ambang perlu diuji). | `SessionServer.apiAbsen`; `Db.catat`; `StudentScanActivity.kirim` | S6: siswa tepat waktu tercatat terlambat. |
-| R1-8 | Isi `onUpgrade` dengan langkah per versi. Tambah tabel `meta(versi)`. Uji migrasi dari versi 1 sebelum rilis berikutnya. | `Db.kt` | S12: data lama rusak saat pembaruan. |
-| R1-9 | Tambahkan "Ekspor cadangan": SQLite dan CSV rekap ke folder Download lewat SAF. Ingatkan guru di akhir hari. | `Db.kt` (fungsi ekspor); layar guru | T7: kehilangan data tanpa jalan pulih. |
-| R1-10 | Kunci mode guru dengan PIN lokal (disimpan sebagai hash). | Layar guru; `App.kt` | S10: server palsu dan bukti "Tercatat" palsu. |
-| R1-11 | Uji 45 menit dengan layar mati. Pastikan layanan foreground dengan notifikasi, WakeLock parsial selama sesi, dan pengecualian pembatasan baterai. | `App.mulaiServer`; layanan guru | S5: absen gagal di tengah sesi. |
-| R1-12 | Saat aplikasi guru dibuka, cek sesi yang masih terbuka. Tawarkan "lanjutkan" atau "tutup", dan hidupkan server lagi. | `App.kt`; `Db.sesiAktif` | S4: sesi tertinggal dan QR mati tanpa diketahui guru. |
-| R1-13 | Ganti `LIMIT` tetap pada rekap dan ringkasan dengan paginasi, dan tampilkan jumlah total. | `Db.rekap`, `ringkasanSesi` | S11: laporan terpotong tanpa peringatan. |
-
-### P2: penyempurnaan
-
-| No | Yang dilakukan | Berkas | Dampak bila tidak dikerjakan |
-|---|---|---|---|
-| R2-1 | Escape HTML pada `guru`, `mapel`, dan `kelas`. Ganti `e.message` dengan pesan galat umum. | `SessionServer.bingkai`, `serve` | R4 |
-| R2-2 | Hapus `Access-Control-Allow-Origin: *` dari endpoint yang memuat roster. | `SessionServer.json` | R4 |
-| R2-3 | Hint port manual diambil dari port yang aktif, bukan tetap 8787. | `StudentScanActivity.tanyaKodeManual` | R1 |
-| R2-4 | Bungkus `bukaSesi` dalam satu transaksi. Baca ulang sesi di dalam kunci saat mencatat. | `Db.bukaSesi`, `catat`; `SessionServer.apiAbsen` | R5 |
-| R2-5 | Parser CSV menangani tanda kutip. Deteksi header memakai daftar sinonim yang terbatas dan cocok persis. | `ImporSiswa.pecahCsv`, `ubahKeSiswa` | R2, R3 |
-
-Play Integrity tidak terlihat di berkas yang dibaca. Verdict-nya hanya bisa diverifikasi lewat backend, dan v1.0 tidak punya backend. Lihat Batasan.
-
----
-
-## 4. Jalur evolusi
-
-Keputusan tanpa VPS dan tanpa Google Sheets tetap berlaku sampai ada kebutuhan pusat. Jalurnya bertahap:
-
-- **Tahap 0 (v1.0):** semua data di HP guru. Sesi berjalan langsung ke HP guru.
-- **Tahap 1 (v1.x):** setiap absen punya `id_absen` (UUID) dan `diubah` (timestamp). Tambah `perangkat_id`. Ekspor sesi sebagai JSON dan impor dengan UPSERT berdasarkan `id_absen`, sehingga impor ulang tidak menggandakan data.
-- **Tahap 2 (v2):** HP guru mengirim batch sesi ke server pusat sekolah secara berkala, misalnya setiap 5 menit saat ada internet. Dashboard wakasek membaca server pusat. Aliran data searah dari HP guru ke pusat, sehingga HP guru tetap sumber saat sesi berjalan.
-
-Keputusan yang harus dibuat sekarang karena menentukan skema: PIN per siswa (R0-1), `id_absen` dan `diubah` (Tahap 1), dan kolom `waktu_scan` (R1-7).
-
----
-
-## 5. Batasan yang diterima sadar
-
-- Data hanya di HP guru. Data hilang bila aplikasi dihapus, HP rusak, atau HP diganti. Mitigasi: R1-9.
-- Tidak ada cadangan otomatis.
-- Tidak ada login guru. Mitigasi parsial: R1-10.
-- Absen hanya bisa dilakukan dalam jaringan yang sama dengan HP guru. Titip absen dari luar jaringan sekolah tidak mungkin, tetapi titip absen dari dalam ruangan tetap mungkin (lihat T1).
-- Tidak ada Play Integrity di v1.0. APK modifikasi, root, dan emulator tidak terdeteksi.
-
----
-
-## 6. Ringkasan untuk pembaca
-
-- Tiga temuan paling berbahaya:
-  1. T1: roster memuat NISN seluruh kelas, dan NISN bukan rahasia, sehingga satu HP bisa mencatat kehadiran teman.
-  2. T2: outbox menghapus kehadiran yang gagal dikirim saat sesi sudah ditutup, tanpa memberi tahu siswa.
-  3. T3 dan T4: alamat QR bisa salah, dan hotspot mungkin tidak menampung satu rombel.
-- Jumlah rekomendasi: P0 = 5, P1 = 13, P2 = 5.
-- Dokumen ini sudah diunggah ke `docs/ARSITEKTUR.md` di branch `main`.
+*Review oleh Arsitek Sistem & Keamanan. Disusun dari pembacaan 6 berkas inti; asumsi dan ketidakpastian tercantum di Bagian 1. Rekomendasi berbentuk keputusan desain, bukan implementasi.*
