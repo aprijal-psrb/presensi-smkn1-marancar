@@ -70,7 +70,7 @@ class StudentScanActivity : AppCompatActivity() {
         opsi.setDesiredBarcodeFormats(ScanOptions.QR_CODE)
         opsi.setPrompt("Arahkan kamera ke QR di HP guru")
         opsi.setBeepEnabled(false)
-        opsi.setOrientationLocked(false)
+        opsi.setOrientationLocked(true)  // kunci portrait; landscape tidak dipakai
         pemindai.launch(opsi)
     }
 
