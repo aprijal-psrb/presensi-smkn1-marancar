@@ -12,6 +12,7 @@ import androidx.appcompat.app.AppCompatActivity
 import id.sch.smkn1marancar.presensi.R
 import id.sch.smkn1marancar.presensi.core.App
 import id.sch.smkn1marancar.presensi.core.PrefGuru
+import id.sch.smkn1marancar.presensi.core.Rapi
 import id.sch.smkn1marancar.presensi.core.SessionService
 
 /**
@@ -82,10 +83,21 @@ class TeacherHomeActivity : AppCompatActivity() {
     private fun bukaSesi() {
         val guru = inputGuru.text.toString().trim()
         val mapel = inputMapel.text.toString().trim()
-        val kelas = inputKelas.text.toString().trim()
+        val kelas = Rapi.kelas(inputKelas.text.toString())
 
         if (guru.isEmpty() || mapel.isEmpty() || kelas.isEmpty()) {
             Toast.makeText(this, "Isi Nama guru, Mapel, dan Kelas dulu.", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        // Fail-closed (perbaikan v1.1): kelas tanpa daftar siswa tidak boleh
+        // dibuka, karena tidak ada siswa yang bisa tercatat dan QR-nya sia-sia.
+        if (app.db.jumlahSiswaKelas(kelas) == 0) {
+            Toast.makeText(
+                this,
+                "Kelas \"$kelas\" belum punya daftar siswa. Impor Excel dulu di menu Data Siswa.",
+                Toast.LENGTH_LONG
+            ).show()
             return
         }
 
