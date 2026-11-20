@@ -3,6 +3,7 @@ package id.sch.smkn1marancar.presensi.core
 import android.content.Context
 import android.net.Uri
 import android.util.Xml
+import org.xmlpull.v1.XmlPullParser
 import java.io.InputStream
 import java.io.StringReader
 import java.util.zip.ZipInputStream
@@ -169,6 +170,10 @@ object ImporSiswa {
 
     // --------------------------------------------------------- pemetaan kolom
 
+    /** NISN 10 digit. Sel Excel bertipe angka membuang nol di depan (0061234567 -> 61234567). */
+    private fun normalisasiNisn(s: String): String =
+        if (s.isNotEmpty() && s.all { it.isDigit() } && s.length < 10) s.padStart(10, '0') else s
+
     private fun ubahKeSiswa(baris: List<List<String>>): List<Siswa> {
         if (baris.isEmpty()) throw IllegalStateException("Berkas kosong.")
 
@@ -203,7 +208,7 @@ object ImporSiswa {
             // Penyeragaman (v1.1): NISN tanpa spasi, nama kelas dirapatkan.
             // Tanpa ini, "XI TKJ 1" vs "XI  TKJ 1" dianggap kelas berbeda dan
             // membuat siswa gagal scan.
-            val nisn = Rapi.nisn(ambil(indeksNisn))
+            val nisn = normalisasiNisn(Rapi.nisn(ambil(indeksNisn)))
             val nama = ambil(indeksNama)
             val kelas = Rapi.kelas(ambil(indeksKelas))
             if (nisn.isBlank() || nama.isBlank() || kelas.isBlank()) continue
