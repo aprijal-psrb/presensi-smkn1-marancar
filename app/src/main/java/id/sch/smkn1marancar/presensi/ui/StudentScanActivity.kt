@@ -1,16 +1,14 @@
 package id.sch.smkn1marancar.presensi.ui
 
 import android.os.Bundle
-import android.text.InputType
 import android.widget.Button
-import android.widget.EditText
-import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import com.journeyapps.barcodescanner.ScanContract
 import com.journeyapps.barcodescanner.ScanOptions
 import id.sch.smkn1marancar.presensi.R
+import id.sch.smkn1marancar.presensi.core.Antrian
 import id.sch.smkn1marancar.presensi.core.App
 import id.sch.smkn1marancar.presensi.core.Identitas
 import id.sch.smkn1marancar.presensi.core.Net
@@ -23,7 +21,9 @@ import org.json.JSONObject
  * Layar siswa: pindai QR guru, kehadiran langsung tercatat.
  *
  * Bila jaringan bermasalah, data scan disimpan dulu di HP (tabel outbox)
- * dan dikirim ulang otomatis — jadi tidak ada kehadiran yang hilang.
+ * dan dikirim ulang otomatis. PENTING (perbaikan v1.1): scan yang ditolak
+ * permanen (sesi ditutup / NISN salah) TIDAK lagi dihapus diam-diam — barisnya
+ * ditandai GAGAL dan siswa diberi tahu agar melapor ke guru.
  */
 class StudentScanActivity : AppCompatActivity() {
 
@@ -103,7 +103,7 @@ class StudentScanActivity : AppCompatActivity() {
     }
 
     /**
-     * Alur: cek sesi → (bila perlu) pilih nama & NISN → kirim kehadiran.
+     * Alur: cek sesi → (bila perlu) pilih nama dari roster → kirim kehadiran.
      * Berjalan di thread latar.
      */
     private fun proses(dasar: String, token: String, kode: String?) {
@@ -146,12 +146,21 @@ class StudentScanActivity : AppCompatActivity() {
             val status = jawab.optString("status", "")
             runOnUiThread { tampilSukses(pesan, status) }
         } catch (e: NetGagal) {
-            runOnUiThread { tampilGagal(e.message ?: "Ditolak server.") }
+            if (e.permanen) {
+                // Ditolak final (sesi ditutup / NISN salah): jangan diantre,
+                // siswa harus tahu dan melapor ke guru.
+                runOnUiThread { tampilGagal(e.message ?: "Ditolak server.") }
+            } else {
+                simpanAntrean("$dasar/api/absen", badan)
+            }
         } catch (e: Exception) {
-            // Jaringan putus / HP guru tidak terjangkau: simpan dulu, kirim nanti.
-            app.db.antrikan("$dasar/api/absen", badan.toString())
-            runOnUiThread { tampilAntri() }
+            simpanAntrean("$dasar/api/absen", badan)
         }
+    }
+
+    private fun simpanAntrean(url: String, badan: JSONObject) {
+        app.db.antrikan(url, badan.toString())
+        runOnUiThread { tampilAntri() }
     }
 
     // ---------------------------------------------------------------- dialog
@@ -166,8 +175,12 @@ class StudentScanActivity : AppCompatActivity() {
             nisn.add(o.optString("nisn"))
         }
 
+        // Fail-closed: tidak ada lagi isian nama bebas. Tanpa roster, siswa
+        // harus melapor ke guru (guru mengimpor Excel / absen manual).
         if (nama.isEmpty()) {
-            tanyaNamaManual(dasar, token, kode, kelas)
+            txtStatus.text = "Daftar siswa kelas $kelas belum tersedia di HP guru. " +
+                "Lapor guru untuk dicatat manual."
+            txtHasil.text = ""
             return
         }
 
@@ -182,9 +195,9 @@ class StudentScanActivity : AppCompatActivity() {
     }
 
     private fun tanyaNisn(dasar: String, token: String, kode: String?, siswa: Siswa) {
-        val input = EditText(this).apply {
+        val input = android.widget.EditText(this).apply {
             hint = "NISN kamu"
-            inputType = InputType.TYPE_CLASS_TEXT
+            inputType = android.text.InputType.TYPE_CLASS_TEXT
         }
         AlertDialog.Builder(this)
             .setTitle(siswa.nama)
@@ -206,49 +219,19 @@ class StudentScanActivity : AppCompatActivity() {
             .show()
     }
 
-    private fun tanyaNamaManual(dasar: String, token: String, kode: String?, kelas: String) {
-        val wadah = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(56, 24, 56, 0)
-        }
-        val inNama = EditText(this).apply { hint = "Nama lengkap" }
-        val inNisn = EditText(this).apply { hint = "NISN" }
-        wadah.addView(inNama)
-        wadah.addView(inNisn)
-
-        AlertDialog.Builder(this)
-            .setTitle("Isi identitas ($kelas)")
-            .setView(wadah)
-            .setPositiveButton("Kirim") { _, _ ->
-                val nama = inNama.text.toString().trim()
-                val nisn = inNisn.text.toString().trim()
-                if (nama.isEmpty() || nisn.isEmpty()) {
-                    txtStatus.text = "Nama dan NISN harus diisi."
-                    return@setPositiveButton
-                }
-                val siswa = Siswa(nisn, nama, kelas)
-                Identitas.simpan(this, siswa)
-                segarkanIdentitas()
-                btnScan.isEnabled = false
-                Thread { kirim(dasar, token, kode, siswa) }.start()
-            }
-            .setNegativeButton("Batal", null)
-            .show()
-    }
-
     /** Cadangan bila kamera bermasalah: masukkan alamat server + kode 6 huruf. */
     private fun tanyaKodeManual() {
         val prefs = getSharedPreferences("siswa", MODE_PRIVATE)
-        val wadah = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
+        val wadah = android.widget.LinearLayout(this).apply {
+            orientation = android.widget.LinearLayout.VERTICAL
             setPadding(56, 24, 56, 0)
         }
-        val inAlamat = EditText(this).apply {
+        val inAlamat = android.widget.EditText(this).apply {
             hint = "http://192.168.43.1:8787"
             setText(prefs.getString("alamat", ""))
-            inputType = InputType.TYPE_TEXT_VARIATION_URI
+            inputType = android.text.InputType.TYPE_TEXT_VARIATION_URI
         }
-        val inKode = EditText(this).apply { hint = "Kode 6 huruf dari layar guru" }
+        val inKode = android.widget.EditText(this).apply { hint = "Kode 6 huruf dari layar guru" }
         wadah.addView(inAlamat)
         wadah.addView(inKode)
 
@@ -301,8 +284,9 @@ class StudentScanActivity : AppCompatActivity() {
 
     private fun tampilAntri() {
         btnScan.isEnabled = true
+        val (menunggu, _) = app.db.hitungAntrian()
         txtHasil.text = "Tersimpan di HP"
-        txtStatus.text = "Jaringan bermasalah. Kehadiranmu aman dan akan dikirim otomatis."
+        txtStatus.text = "Jaringan bermasalah. $menunggu kehadiran menunggu dikirim otomatis."
     }
 
     private fun konfirmasiGantiIdentitas() {
@@ -318,20 +302,48 @@ class StudentScanActivity : AppCompatActivity() {
             .show()
     }
 
-    /** Kirim ulang scan yang tertunda (dipanggil saat layar dibuka & setelah sukses). */
+    /**
+     * Kirim ulang scan yang tertunda.
+     *
+     * Aturan (perbaikan v1.1):
+     *  - sukses            -> baris dihapus;
+     *  - ditolak permanen  -> ditandai GAGAL + pesan, TIDAK dihapus, siswa diberi tahu;
+     *  - gagal sementara   -> tetap MENUNGGU, dengan jeda mundur 2^coba detik (maks 60 dtk).
+     */
     private fun flushAntrian() {
         Thread {
-            for ((id, url, isi) in app.db.daftarAntrian()) {
+            val sekarang = System.currentTimeMillis()
+            for (a in app.db.daftarAntrian()) {
+                if (!bolehDicoba(a, sekarang)) continue
                 try {
-                    Net.kirim(url, JSONObject(isi))
-                    app.db.hapusAntrian(id)
+                    Net.kirim(a.url, JSONObject(a.isi))
+                    app.db.hapusAntrian(a.id)
                 } catch (e: NetGagal) {
-                    // Ditolak permanen (mis. sesi sudah ditutup) — jangan diulang terus.
-                    app.db.hapusAntrian(id)
+                    if (e.permanen) {
+                        app.db.tandaiGagal(a.id, e.message ?: "Ditolak server")
+                    } else {
+                        app.db.tandaiCoba(a.id)
+                    }
                 } catch (e: Exception) {
-                    app.db.tandaiCoba(id)
+                    app.db.tandaiCoba(a.id)
+                }
+            }
+            val (menunggu, gagal) = app.db.hitungAntrian()
+            runOnUiThread {
+                if (gagal > 0) {
+                    txtStatus.text = "$gagal kehadiran TIDAK masuk (sesi sudah ditutup / NISN salah). " +
+                        "Lapor guru untuk dicatat manual."
+                } else if (menunggu > 0) {
+                    txtStatus.text = "$menunggu kehadiran menunggu dikirim otomatis."
                 }
             }
         }.start()
+    }
+
+    /** Jeda mundur sederhana agar tidak menembak server terus-menerus. */
+    private fun bolehDicoba(a: Antrian, sekarang: Long): Boolean {
+        if (a.coba <= 0) return true
+        val jedaDetik = minOf(1L shl a.coba.coerceAtMost(6), 60L)
+        return sekarang - a.terakhir >= jedaDetik * 1000L
     }
 }
