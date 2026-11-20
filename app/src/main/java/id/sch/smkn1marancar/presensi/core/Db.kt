@@ -14,6 +14,11 @@ import android.database.sqlite.SQLiteOpenHelper
  *  - absen   : kehadiran siswa, UNIQUE(sesi, nisn) => mustahil tercatat dua kali
  *  - roster  : daftar siswa hasil impor Excel
  *  - outbox  : antrean scan di HP siswa yang belum berhasil terkirim
+ *
+ * VERSI 2 (v1.1):
+ *  - outbox mendapat kolom status/pesan/terakhir supaya scan yang gagal terkirim
+ *    TIDAK dibuang diam-diam (temuan T4 pada docs/ARSITEKTUR.md);
+ *  - indeks idx_absen_sesi & idx_sesi_token supaya rekap tidak melambat (P2-1).
  */
 class Db(context: Context) : SQLiteOpenHelper(context, NAMA_BERKAS, null, VERSI) {
 
@@ -44,6 +49,8 @@ class Db(context: Context) : SQLiteOpenHelper(context, NAMA_BERKAS, null, VERSI)
                  UNIQUE(sesi, nisn))"""
         )
         db.execSQL("CREATE INDEX idx_absen_waktu ON absen(waktu)")
+        db.execSQL("CREATE INDEX idx_absen_sesi ON absen(sesi)")
+        db.execSQL("CREATE INDEX idx_sesi_token ON sesi(token)")
         db.execSQL(
             """CREATE TABLE roster (
                  _id   INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -54,16 +61,29 @@ class Db(context: Context) : SQLiteOpenHelper(context, NAMA_BERKAS, null, VERSI)
         )
         db.execSQL(
             """CREATE TABLE outbox (
-                 _id    INTEGER PRIMARY KEY AUTOINCREMENT,
-                 url    TEXT NOT NULL,
-                 isi    TEXT NOT NULL,
-                 dibuat INTEGER NOT NULL,
-                 coba   INTEGER NOT NULL DEFAULT 0)"""
+                 _id      INTEGER PRIMARY KEY AUTOINCREMENT,
+                 url      TEXT NOT NULL,
+                 isi      TEXT NOT NULL,
+                 dibuat   INTEGER NOT NULL,
+                 coba     INTEGER NOT NULL DEFAULT 0,
+                 terakhir INTEGER NOT NULL DEFAULT 0,
+                 status   TEXT NOT NULL DEFAULT 'MENUNGGU',
+                 pesan    TEXT NOT NULL DEFAULT '')"""
         )
     }
 
+    /**
+     * Migrasi bertahap. WAJIB ada karena aplikasi sudah dipakai di HP guru/siswa:
+     * tanpa ini, pengguna versi 1.0 akan crash saat memperbarui ke 1.1.
+     */
     override fun onUpgrade(db: SQLiteDatabase, lama: Int, baru: Int) {
-        // Versi pertama: belum ada migrasi.
+        if (lama < 2) {
+            db.execSQL("ALTER TABLE outbox ADD COLUMN status TEXT NOT NULL DEFAULT 'MENUNGGU'")
+            db.execSQL("ALTER TABLE outbox ADD COLUMN pesan TEXT NOT NULL DEFAULT ''")
+            db.execSQL("ALTER TABLE outbox ADD COLUMN terakhir INTEGER NOT NULL DEFAULT 0")
+            db.execSQL("CREATE INDEX IF NOT EXISTS idx_absen_sesi ON absen(sesi)")
+            db.execSQL("CREATE INDEX IF NOT EXISTS idx_sesi_token ON sesi(token)")
+        }
     }
 
     // ---------------------------------------------------------------- sesi
@@ -75,23 +95,27 @@ class Db(context: Context) : SQLiteOpenHelper(context, NAMA_BERKAS, null, VERSI)
     @Synchronized
     fun bukaSesi(guru: String, mapel: String, kelas: String, toleransiMenit: Int = 15): Sesi {
         val sekarang = System.currentTimeMillis()
-        writableDatabase.execSQL(
-            "UPDATE sesi SET ditutup = ? WHERE ditutup IS NULL",
-            arrayOf<Any>(sekarang)
-        )
-        val sesi = Sesi(
-            id = Acak.hex(8),
-            guru = guru.trim(),
-            mapel = mapel.trim(),
-            kelas = kelas.trim(),
-            token = Acak.hex(12),
-            kode = Acak.kode(6),
-            dibukaPada = sekarang,
-            ditutupPada = null,
-            toleransiMenit = toleransiMenit
-        )
-        writableDatabase.insertOrThrow("sesi", null, isiSesi(sesi))
-        return sesi
+        val db = writableDatabase
+        db.beginTransaction()
+        try {
+            db.execSQL("UPDATE sesi SET ditutup = ? WHERE ditutup IS NULL", arrayOf<Any>(sekarang))
+            val sesi = Sesi(
+                id = Acak.hex(8),
+                guru = guru.trim(),
+                mapel = mapel.trim(),
+                kelas = Rapi.kelas(kelas),
+                token = Acak.hex(12),
+                kode = Acak.kode(6),
+                dibukaPada = sekarang,
+                ditutupPada = null,
+                toleransiMenit = toleransiMenit
+            )
+            db.insertOrThrow("sesi", null, isiSesi(sesi))
+            db.setTransactionSuccessful()
+            return sesi
+        } finally {
+            db.endTransaction()
+        }
     }
 
     /** Ganti QR: token & kode baru, token lama langsung tidak berlaku. */
@@ -158,7 +182,7 @@ class Db(context: Context) : SQLiteOpenHelper(context, NAMA_BERKAS, null, VERSI)
 
         val cv = ContentValues().apply {
             put("sesi", sesi.id)
-            put("nisn", nisn)
+            put("nisn", Rapi.nisn(nisn))
             put("nama", nama)
             put("kelas", sesi.kelas)
             put("mapel", sesi.mapel)
@@ -207,9 +231,9 @@ class Db(context: Context) : SQLiteOpenHelper(context, NAMA_BERKAS, null, VERSI)
             db.delete("roster", null, null)
             for (s in daftar) {
                 val cv = ContentValues().apply {
-                    put("nisn", s.nisn)
-                    put("nama", s.nama)
-                    put("kelas", s.kelas)
+                    put("nisn", Rapi.nisn(s.nisn))
+                    put("nama", s.nama.trim())
+                    put("kelas", Rapi.kelas(s.kelas))
                 }
                 db.insertWithOnConflict("roster", null, cv, SQLiteDatabase.CONFLICT_REPLACE)
             }
@@ -225,14 +249,14 @@ class Db(context: Context) : SQLiteOpenHelper(context, NAMA_BERKAS, null, VERSI)
 
     @Synchronized
     fun jumlahSiswaKelas(kelas: String): Int =
-        hitung("SELECT COUNT(*) FROM roster WHERE kelas = ?", arrayOf(kelas))
+        hitung("SELECT COUNT(*) FROM roster WHERE kelas = ?", arrayOf(Rapi.kelas(kelas)))
 
     @Synchronized
     fun rosterKelas(kelas: String): List<Siswa> {
         val hasil = mutableListOf<Siswa>()
         readableDatabase.rawQuery(
             "SELECT nisn, nama, kelas FROM roster WHERE kelas = ? ORDER BY nama ASC",
-            arrayOf(kelas)
+            arrayOf(Rapi.kelas(kelas))
         ).use { c ->
             while (c.moveToNext()) hasil.add(Siswa(c.getString(0), c.getString(1), c.getString(2)))
         }
@@ -243,7 +267,7 @@ class Db(context: Context) : SQLiteOpenHelper(context, NAMA_BERKAS, null, VERSI)
     fun cariSiswa(kelas: String, nisn: String): Siswa? {
         readableDatabase.rawQuery(
             "SELECT nisn, nama, kelas FROM roster WHERE kelas = ? AND nisn = ? LIMIT 1",
-            arrayOf(kelas, nisn)
+            arrayOf(Rapi.kelas(kelas), Rapi.nisn(nisn))
         ).use { c ->
             return if (c.moveToNext()) Siswa(c.getString(0), c.getString(1), c.getString(2)) else null
         }
@@ -275,7 +299,7 @@ class Db(context: Context) : SQLiteOpenHelper(context, NAMA_BERKAS, null, VERSI)
         val syarat = mutableListOf<String>()
         val args = mutableListOf<String>()
         if (!kelas.isNullOrBlank()) {
-            syarat.add("kelas = ?"); args.add(kelas)
+            syarat.add("kelas = ?"); args.add(Rapi.kelas(kelas))
         }
         if (!mapel.isNullOrBlank()) {
             syarat.add("mapel = ?"); args.add(mapel)
@@ -301,7 +325,7 @@ class Db(context: Context) : SQLiteOpenHelper(context, NAMA_BERKAS, null, VERSI)
         val syarat = mutableListOf<String>()
         val args = mutableListOf<String>()
         if (!kelas.isNullOrBlank()) {
-            syarat.add("s.kelas = ?"); args.add(kelas)
+            syarat.add("s.kelas = ?"); args.add(Rapi.kelas(kelas))
         }
         if (!mapel.isNullOrBlank()) {
             syarat.add("s.mapel = ?"); args.add(mapel)
@@ -339,25 +363,72 @@ class Db(context: Context) : SQLiteOpenHelper(context, NAMA_BERKAS, null, VERSI)
         writableDatabase.insert("outbox", null, cv)
     }
 
+    /** Hanya scan yang masih boleh dicoba ulang (status MENUNGGU). */
     @Synchronized
-    fun daftarAntrian(): List<Triple<Long, String, String>> {
-        val hasil = mutableListOf<Triple<Long, String, String>>()
+    fun daftarAntrian(): List<Antrian> {
+        val hasil = mutableListOf<Antrian>()
         readableDatabase.rawQuery(
-            "SELECT _id, url, isi FROM outbox ORDER BY _id ASC LIMIT 100", null
+            "SELECT _id, url, isi, coba, terakhir, status, pesan FROM outbox " +
+                "WHERE status = 'MENUNGGU' ORDER BY _id ASC LIMIT 100", null
         ).use { c ->
-            while (c.moveToNext()) hasil.add(Triple(c.getLong(0), c.getString(1), c.getString(2)))
+            while (c.moveToNext()) {
+                hasil.add(
+                    Antrian(
+                        id = c.getLong(0),
+                        url = c.getString(1),
+                        isi = c.getString(2),
+                        coba = c.getInt(3),
+                        terakhir = c.getLong(4),
+                        status = c.getString(5),
+                        pesan = c.getString(6)
+                    )
+                )
+            }
         }
         return hasil
     }
 
     @Synchronized
     fun tandaiCoba(id: Long) {
-        writableDatabase.execSQL("UPDATE outbox SET coba = coba + 1 WHERE _id = ?", arrayOf<Any>(id))
+        writableDatabase.execSQL(
+            "UPDATE outbox SET coba = coba + 1, terakhir = ? WHERE _id = ?",
+            arrayOf<Any>(System.currentTimeMillis(), id)
+        )
+    }
+
+    /**
+     * Tandai GAGAL permanen (mis. sesi sudah ditutup). Baris TIDAK dihapus,
+     * supaya siswa & guru tahu ada kehadiran yang belum masuk.
+     */
+    @Synchronized
+    fun tandaiGagal(id: Long, pesan: String) {
+        val cv = ContentValues().apply {
+            put("status", "GAGAL")
+            put("pesan", pesan)
+            put("terakhir", System.currentTimeMillis())
+        }
+        writableDatabase.update("outbox", cv, "_id = ?", arrayOf(id.toString()))
     }
 
     @Synchronized
     fun hapusAntrian(id: Long) {
         writableDatabase.delete("outbox", "_id = ?", arrayOf(id.toString()))
+    }
+
+    /** @return pasangan (menunggu, gagal) untuk ditampilkan di layar siswa. */
+    @Synchronized
+    fun hitungAntrian(): Pair<Int, Int> {
+        var menunggu = 0
+        var gagal = 0
+        readableDatabase.rawQuery(
+            "SELECT status, COUNT(*) FROM outbox GROUP BY status", null
+        ).use { c ->
+            while (c.moveToNext()) {
+                val jumlah = c.getInt(1)
+                if (c.getString(0) == "GAGAL") gagal += jumlah else menunggu += jumlah
+            }
+        }
+        return menunggu to gagal
     }
 
     // -------------------------------------------------------------- bantuan
@@ -410,6 +481,8 @@ class Db(context: Context) : SQLiteOpenHelper(context, NAMA_BERKAS, null, VERSI)
 
     companion object {
         private const val NAMA_BERKAS = "presensi.db"
-        private const val VERSI = 1
+
+        /** Naik ke 2 di v1.1 — lihat onUpgrade(). */
+        private const val VERSI = 2
     }
 }
