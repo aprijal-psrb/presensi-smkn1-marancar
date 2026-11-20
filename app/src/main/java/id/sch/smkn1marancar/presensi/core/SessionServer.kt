@@ -13,11 +13,11 @@ import java.net.URLEncoder
  * terhubung ke Wi-Fi/hotspot yang sama tinggal memindai QR.
  *
  * Endpoint:
- *   GET  /s/{token}      halaman HTML (bila QR dipindai dengan kamera biasa)
- *   GET  /api/sesi?token=  info sesi yang sedang berjalan
+ *   GET  /s/{token}          halaman HTML (bila QR dipindai dengan kamera biasa)
+ *   GET  /api/sesi?token=    info sesi yang sedang berjalan
  *   GET  /api/roster?token=  daftar nama siswa kelas tersebut (untuk pilih nama)
- *   POST /api/absen      catat kehadiran  {token|kode, nisn, nama}
- *   GET  /api/ping       cek server hidup
+ *   POST /api/absen          catat kehadiran  {token|kode, nisn}
+ *   GET  /api/ping           cek server hidup
  */
 class SessionServer(private val app: App, port: Int) : NanoHTTPD(port) {
 
@@ -40,7 +40,7 @@ class SessionServer(private val app: App, port: Int) : NanoHTTPD(port) {
         } catch (e: Exception) {
             json(
                 Response.Status.INTERNAL_ERROR,
-                JSONObject().put("ok", false).put("pesan", "Galat server: ${e.message}")
+                JSONObject().put("ok", false).put("pesan", "Galat server. Coba lagi.")
             )
         }
     }
@@ -99,9 +99,10 @@ class SessionServer(private val app: App, port: Int) : NanoHTTPD(port) {
      * Inti pencegahan kecurangan:
      *  - token harus milik sesi yang MASIH terbuka (QR mati begitu sesi ditutup
      *    atau guru menekan "Ganti QR");
-     *  - NISN wajib terdaftar di kelas sesi tersebut (kalau roster sudah diimpor),
-     *    sehingga siswa tidak bisa memakai NISN teman dari kelas lain;
-     *  - nama diambil dari roster, bukan dari isian HP siswa.
+     *  - daftar siswa kelas sesi WAJIB ada. Bila kosong, permintaan DITOLAK
+     *    (fail-closed, perbaikan v1.1 — sebelumnya nama dari HP siswa diterima
+     *    apa adanya sehingga siapa pun bisa mencatat nama fiktif);
+     *  - NISN wajib terdaftar di kelas sesi tersebut, dan nama diambil dari roster.
      */
     private fun apiAbsen(s: IHTTPSession): Response {
         val peta = HashMap<String, String>()
@@ -111,8 +112,7 @@ class SessionServer(private val app: App, port: Int) : NanoHTTPD(port) {
 
         val token = j.optString("token", "")
         val kode = j.optString("kode", "").uppercase()
-        val nisn = j.optString("nisn", "").trim()
-        var nama = j.optString("nama", "").trim()
+        val nisn = Rapi.nisn(j.optString("nisn", ""))
 
         val sesi = db.sesiByToken(token) ?: db.sesiByKode(kode)
             ?: return json(
@@ -132,21 +132,23 @@ class SessionServer(private val app: App, port: Int) : NanoHTTPD(port) {
             JSONObject().put("ok", false).put("pesan", "NISN belum diisi.")
         )
 
-        // Cocokkan dengan daftar siswa kelas (bila roster sudah diimpor)
-        val siswa = db.cariSiswa(sesi.kelas, nisn)
-        if (siswa != null) {
-            nama = siswa.nama
-        } else if (db.jumlahSiswaKelas(sesi.kelas) > 0) {
+        // Fail-closed: tanpa roster, kehadiran tidak boleh dicatat sama sekali.
+        if (db.jumlahSiswaKelas(sesi.kelas) == 0) {
             return json(
+                Response.Status.CONFLICT,
+                JSONObject().put("ok", false).put("status", "ROSTER_KOSONG")
+                    .put("pesan", "Daftar siswa kelas ${sesi.kelas} belum diimpor di HP guru.")
+            )
+        }
+
+        // Nama SELALU dari roster Excel, bukan dari HP siswa.
+        val siswa = db.cariSiswa(sesi.kelas, nisn)
+            ?: return json(
                 Response.Status.CONFLICT,
                 JSONObject().put("ok", false).put("status", "NISN_TIDAK_COCOK")
                     .put("pesan", "NISN $nisn tidak terdaftar di kelas ${sesi.kelas}.")
             )
-        }
-        if (nama.isBlank()) return json(
-            Response.Status.BAD_REQUEST,
-            JSONObject().put("ok", false).put("pesan", "Nama belum diisi.")
-        )
+        val nama = siswa.nama
 
         val baru = db.catat(sesi, nisn, nama, System.currentTimeMillis())
         val (hadir, terlambat) = db.hitungStatus(sesi.id)
@@ -188,11 +190,23 @@ class SessionServer(private val app: App, port: Int) : NanoHTTPD(port) {
             )
         )
 
-        val alamat = "http://${Jaringan.ipLokal()}:$listeningPort/s/$token"
+        // Pakai alamat yang SAMA dengan yang tercetak di QR, agar tidak pernah
+        // terjadi tautan yang menunjuk alamat berbeda dari QR di layar guru.
+        val dasar = Jaringan.alamatServer(listeningPort)
+            ?: return html(
+                Response.Status.OK,
+                bingkai(
+                    "HP guru belum terhubung jaringan",
+                    "Nyalakan hotspot atau sambungkan Wi-Fi, lalu tampilkan QR ulang.",
+                    null
+                )
+            )
+
+        val alamat = "$dasar/s/$token"
         val tautan = "presensi://absen?u=" + URLEncoder.encode(alamat, "UTF-8")
-        val info = "<div class='baris'><span>Guru</span><b>${sesi.guru}</b></div>" +
-            "<div class='baris'><span>Mapel</span><b>${sesi.mapel}</b></div>" +
-            "<div class='baris'><span>Kelas</span><b>${sesi.kelas}</b></div>" +
+        val info = "<div class='baris'><span>Guru</span><b>${aman(sesi.guru)}</b></div>" +
+            "<div class='baris'><span>Mapel</span><b>${aman(sesi.mapel)}</b></div>" +
+            "<div class='baris'><span>Kelas</span><b>${aman(sesi.kelas)}</b></div>" +
             "<div class='baris'><span>Dibuka</span><b>${Waktu.jam(sesi.dibukaPada)}</b></div>"
 
         return html(
@@ -223,15 +237,21 @@ h1{font-size:19px;color:#0A4C37;margin:0 0 10px;line-height:1.3}
 .tombol{display:block;text-align:center;background:#0F6E4F;color:#fff;text-decoration:none;padding:16px;border-radius:12px;font-weight:700;margin-top:18px}
 .baris{display:flex;justify-content:space-between;gap:12px;padding:9px 0;border-bottom:1px solid #EDF1EF;font-size:14px}
 </style></head><body>
-<div class="kartu"><h1>$judul</h1><div class="isi">$isi</div>$tombol</div>
+<div class="kartu"><h1>${aman(judul)}</h1><div class="isi">$isi</div>$tombol</div>
 </body></html>"""
     }
+
+    /** Cegah HTML/JS dari isian guru ikut tereksekusi di peramban siswa. */
+    private fun aman(teks: String): String = teks
+        .replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace("\"", "&quot;")
 
     // -------------------------------------------------------------- bantuan
 
     private fun json(status: Response.Status, isi: JSONObject): Response {
         val r = newFixedLengthResponse(status, "application/json; charset=utf-8", isi.toString())
-        r.addHeader("Access-Control-Allow-Origin", "*")
         r.addHeader("Cache-Control", "no-store")
         return r
     }
