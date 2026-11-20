@@ -25,7 +25,7 @@ class MainActivity : AppCompatActivity() {
         findViewById<Button>(R.id.btnSiswa).setOnClickListener {
             startActivity(Intent(this, StudentScanActivity::class.java))
         }
-        findViewById<TextView>(R.id.txtVersi).text = "Versi 1.0 • Android 10 ke atas"
+        findViewById<TextView>(R.id.txtVersi).text = "Versi 1.1 • Android 10 ke atas"
 
         mintaIzinNotifikasi()
         tanganiTautan(intent)

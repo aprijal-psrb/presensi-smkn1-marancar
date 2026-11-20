@@ -55,9 +55,9 @@ object Jaringan {
     /**
      * Ambil IPv4 lokal yang paling mungkin dijangkau siswa.
      *
-     * URUTAN PENTING (perbaikan v1.1): mode hotspot (ap*/swlan*) didahulukan
-     * di atas wlan*, karena bila guru menyalakan hotspot SEKALIGUS tersambung
-     * ke Wi-Fi sekolah, alamat wlan* tidak bisa dijangkau siswa hotspot.
+     * URUTAN PENTING (perbaikan v1.1): antarmuka hotspot (ap atau swlan)
+     * didahulukan di atas wlan, karena bila guru menyalakan hotspot SEKALIGUS
+     * tersambung ke Wi-Fi sekolah, alamat wlan tidak bisa dijangkau siswa hotspot.
      */
     fun ipLokal(): String {
         try {
