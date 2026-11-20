@@ -38,6 +38,21 @@ data class Siswa(
     val kelas: String
 )
 
+/**
+ * Satu scan yang belum berhasil terkirim dari HP siswa.
+ *
+ * status: MENUNGGU (masih dicoba) atau GAGAL (ditolak permanen — harus dilaporkan ke guru).
+ */
+data class Antrian(
+    val id: Long,
+    val url: String,
+    val isi: String,
+    val coba: Int,
+    val terakhir: Long,
+    val status: String,
+    val pesan: String
+)
+
 /** Ringkasan untuk daftar rekap. */
 data class RingkasanSesi(
     val sesi: Sesi,
