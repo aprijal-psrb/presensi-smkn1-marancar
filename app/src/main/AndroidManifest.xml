@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
 
     <!-- Server absensi berjalan DI DALAM HP GURU, jadi butuh akses jaringan lokal -->
     <uses-permission android:name="android.permission.INTERNET" />
@@ -46,6 +47,12 @@
         <activity android:name=".ui.RosterActivity" android:exported="false" />
         <activity android:name=".ui.ReportActivity" android:exported="false" />
         <activity android:name=".ui.StudentScanActivity" android:exported="false" />
+
+        <!-- Pemindai QR siswa: selalu potret (portrait), tidak ikut rotasi ke landscape. -->
+        <activity
+            android:name="com.journeyapps.barcodescanner.CaptureActivity"
+            android:screenOrientation="portrait"
+            tools:replace="android:screenOrientation" />
 
         <service
             android:name=".core.SessionService"
