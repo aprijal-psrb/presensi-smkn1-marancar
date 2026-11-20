@@ -3,7 +3,6 @@ package id.sch.smkn1marancar.presensi.core
 import android.content.Context
 import android.net.Uri
 import android.util.Xml
-import org.xmlpull.v1.XmlPullParser
 import java.io.InputStream
 import java.io.StringReader
 import java.util.zip.ZipInputStream
@@ -23,11 +22,10 @@ object ImporSiswa {
         val namaBerkas = (uri.lastPathSegment ?: "").lowercase()
         val isCsv = namaBerkas.endsWith(".csv") || namaBerkas.endsWith(".txt")
 
-        val teksCsv: String?
         val baris: List<List<String>>
 
         if (isCsv) {
-            teksCsv = ctx.contentResolver.openInputStream(uri)
+            val teksCsv = ctx.contentResolver.openInputStream(uri)
                 ?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }
                 ?: throw IllegalStateException("Berkas tidak bisa dibuka.")
             baris = pecahCsv(teksCsv)
@@ -131,7 +129,7 @@ object ImporSiswa {
                             } else {
                                 mentah
                             }
-                            if (daftar.size == indeksKolom) daftar.add(isi) else daftar.add(isi)
+                            daftar.add(isi)
                         }
                     }
                     "row" -> {
@@ -202,9 +200,12 @@ object ImporSiswa {
             val r = baris[i]
             fun ambil(idx: Int) = r.getOrNull(idx)?.trim().orEmpty()
 
-            val nisn = ambil(indeksNisn)
+            // Penyeragaman (v1.1): NISN tanpa spasi, nama kelas dirapatkan.
+            // Tanpa ini, "XI TKJ 1" vs "XI  TKJ 1" dianggap kelas berbeda dan
+            // membuat siswa gagal scan.
+            val nisn = Rapi.nisn(ambil(indeksNisn))
             val nama = ambil(indeksNama)
-            val kelas = ambil(indeksKelas)
+            val kelas = Rapi.kelas(ambil(indeksKelas))
             if (nisn.isBlank() || nama.isBlank() || kelas.isBlank()) continue
 
             val kunci = "$kelas|$nisn"
