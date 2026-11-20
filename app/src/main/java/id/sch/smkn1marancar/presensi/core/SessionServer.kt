@@ -85,6 +85,11 @@ class SessionServer(private val app: App, port: Int) : NanoHTTPD(port) {
                 Response.Status.CONFLICT,
                 JSONObject().put("ok", false).put("pesan", "QR tidak dikenali.")
             )
+        if (!sesi.aktif) return json(
+            Response.Status.CONFLICT,
+            JSONObject().put("ok", false).put("status", "SESI_DITUTUP")
+                .put("pesan", "Sesi presensi sudah ditutup guru.")
+        )
         val daftar = JSONArray()
         db.rosterKelas(sesi.kelas).forEach { sw ->
             daftar.put(JSONObject().put("nisn", sw.nisn).put("nama", sw.nama))
