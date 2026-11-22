@@ -68,13 +68,16 @@ app/src/main/java/id/sch/smkn1marancar/presensi/
 gradle :app:assembleRelease
 ```
 
-Kunci tanda tangan ada di `app/keystore/presensi.p12.b64` (khusus aplikasi sekolah ini,
-bukan kunci rahasia). Workflow CI men-decode-nya sebelum menandatangani APK.
+Kunci tanda tangan **tidak** disimpan di repo. CI mengambilnya dari GitHub Secrets
+(`KEYSTORE_B64`, `KEYSTORE_PASSWORD`, `KEY_ALIAS`, `KEY_PASSWORD`), memakainya untuk
+menandatangani APK, lalu menghapusnya lagi dari runner.
+Rincian & cara merawat: [`docs/KUNCI-TANDA-TANGAN.md`](docs/KUNCI-TANDA-TANGAN.md).
 
 ## Dokumen
 
 - [`docs/PANDUAN-GURU.md`](docs/PANDUAN-GURU.md) — satu halaman untuk guru
 - [`docs/PANDUAN-SISWA.md`](docs/PANDUAN-SISWA.md) — satu halaman untuk siswa
 - [`docs/FITUR.md`](docs/FITUR.md) — fitur yang sudah & belum dikerjakan
+- [`docs/KUNCI-TANDA-TANGAN.md`](docs/KUNCI-TANDA-TANGAN.md) — status kunci tanda tangan APK
 - [`docs/contoh-data-siswa.csv`](docs/contoh-data-siswa.csv) — contoh format impor
 - [`docs/ARSITEKTUR.md`](docs/ARSITEKTUR.md) — review arsitektur & rekomendasi

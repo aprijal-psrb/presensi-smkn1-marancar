@@ -14,6 +14,12 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
+    # Password kunci hanya lewat environment, tidak pernah ditulis ke repo.
+    env:
+      KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+      KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+      KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -29,20 +35,54 @@ jobs:
         with:
           gradle-version: '8.7'
 
-      - name: Pulihkan kunci tanda tangan
+      # Kunci disimpan sebagai GitHub Secret (base64), bukan di repo.
+      # Cara menyiapkan/memulihkan: docs/KUNCI-TANDA-TANGAN.md
+      - name: Pulihkan kunci tanda tangan dari Secrets
+        env:
+          KEYSTORE_B64: ${{ secrets.KEYSTORE_B64 }}
         run: |
+          if [ -z "$KEYSTORE_B64" ]; then
+            echo "::error::Secret KEYSTORE_B64 belum diisi. Lihat docs/KUNCI-TANDA-TANGAN.md"
+            exit 1
+          fi
+          if [ -z "$KEYSTORE_PASSWORD" ]; then
+            echo "::error::Secret KEYSTORE_PASSWORD belum diisi."
+            exit 1
+          fi
           mkdir -p app/keystore
-          base64 -d app/keystore/presensi.p12.b64 > app/keystore/presensi.p12
+          printf '%s' "$KEYSTORE_B64" | base64 -d > app/keystore/presensi.p12
+          test -s app/keystore/presensi.p12 || { echo "::error::Kunci gagal di-decode"; exit 1; }
+          echo "Sidik jari kunci penanda tangan (untuk dicatat di catatan rilis):"
+          keytool -list -v -keystore app/keystore/presensi.p12 -storetype PKCS12 \
+            -storepass "$KEYSTORE_PASSWORD" -alias "${KEY_ALIAS:-presensi}" \
+            | grep -E "Alias name:|SHA256:"
 
       - name: Build APK rilis
         run: |
           set -o pipefail
           gradle :app:assembleRelease --no-daemon --stacktrace 2>&1 | tee build-log.txt
 
+      - name: Pastikan APK benar-benar ditandatangani
+        run: |
+          APK=app/build/outputs/apk/release/app-release.apk
+          if [ ! -f "$APK" ]; then
+            echo "::error::APK rilis bertanda tangan tidak ditemukan (kemungkinan signing config tidak aktif)."
+            exit 1
+          fi
+          BT=$(ls -d "$ANDROID_HOME"/build-tools/* 2>/dev/null | sort -V | tail -1 || true)
+          if [ -n "$BT" ] && [ -x "$BT/apksigner" ]; then
+            "$BT/apksigner" verify --print-certs "$APK" | grep -i "SHA-256" || true
+          fi
+
+      # Kunci tidak dibiarkan tertinggal di runner.
+      - name: Hapus kunci dari runner
+        if: always()
+        run: rm -f app/keystore/presensi.p12
+
       - name: Siapkan berkas APK
         run: |
           mkdir -p dist
-          cp app/build/outputs/apk/release/app-release.apk "dist/Presensi-SMKN1-Marancar-v1.1.apk"
+          cp app/build/outputs/apk/release/app-release.apk "dist/Presensi-SMKN1-Marancar-v1.2.apk"
           ls -lh dist
 
       - name: Unggah artefak build
@@ -55,17 +95,21 @@ jobs:
       - name: Buat Release berisi APK
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v1.1.${{ github.run_number }}
-          name: Presensi SMKN 1 Marancar v1.1.${{ github.run_number }}
+          tag_name: v1.2.${{ github.run_number }}
+          name: Presensi SMKN 1 Marancar v1.2.${{ github.run_number }}
           body: |
             APK siap pasang (Android 10 ke atas).
-            Unduh berkas di bawah, buka di HP, izinkan "Instal dari sumber tidak dikenal", lalu pasang.
 
-            **Perbaikan v1.1** (dari review docs/ARSITEKTUR.md):
-            - Kehadiran yang gagal terkirim TIDAK lagi dibuang diam-diam; siswa diberi tahu bila ditolak.
-            - QR memakai alamat hotspot yang benar dan diperbarui otomatis bila IP berubah.
-            - Kelas tanpa daftar siswa tidak bisa dibuka; isian nama bebas di HP siswa dihapus.
-            - Nama kelas diseragamkan saat impor Excel (spasi ganda tidak lagi memecah kelas).
+            ## ⚠️ WAJIB DIBACA — kunci tanda tangan diganti
+            Mulai v1.2 aplikasi ditandatangani dengan **kunci baru**. Android tidak mengizinkan
+            pembaruan lintas kunci, jadi:
+
+            1. **Ekspor dulu** rekap dari aplikasi lama (menu Rekap → Ekspor CSV) agar riwayat tidak hilang.
+            2. **Uninstall** aplikasi Presensi versi lama.
+            3. Pasang APK v1.2 di bawah, lalu impor ulang daftar siswa (Excel/CSV).
+
+            Alasan: kunci tanda tangan v1.0–v1.1 sempat bocor ke repo publik sehingga
+            tidak lagi layak dipakai. Rincian ada di `docs/KUNCI-TANDA-TANGAN.md`.
 
             Panduan lengkap ada di folder `docs/` repositori ini.
           files: dist/*.apk

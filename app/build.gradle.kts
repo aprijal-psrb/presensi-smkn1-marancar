@@ -3,9 +3,16 @@ plugins {
     id("org.jetbrains.kotlin.android")
 }
 
-// Kunci tanda tangan: file .p12 hasil decode dari keystore/presensi.p12.b64
-// (dibuat otomatis oleh workflow CI, lihat .github/workflows/build.yml)
+// ── Kunci tanda tangan ───────────────────────────────────────────────────────
+// File kunci DAN password TIDAK disimpan di repo ini.
+// CI men-decode app/keystore/presensi.p12 dari GitHub Secrets (KEYSTORE_B64),
+// lalu mengirim password lewat variabel lingkungan (KEYSTORE_PASSWORD, KEY_PASSWORD).
+// Lihat .github/workflows/build.yml dan docs/KUNCI-TANDA-TANGAN.md
 val kunciRilis = file("keystore/presensi.p12")
+val passKeystore = System.getenv("KEYSTORE_PASSWORD").orEmpty()
+val aliasKunci = System.getenv("KEY_ALIAS") ?: "presensi"
+val passKunci = System.getenv("KEY_PASSWORD") ?: passKeystore
+val kunciSiap = kunciRilis.exists() && passKeystore.isNotEmpty()
 
 android {
     namespace = "id.sch.smkn1marancar.presensi"
@@ -15,18 +22,18 @@ android {
         applicationId = "id.sch.smkn1marancar.presensi"
         minSdk = 29          // Android 10 (Q) — sesuai target perangkat sekolah
         targetSdk = 34
-        versionCode = 2      // v1.1: perbaikan P0 (outbox, roster, alamat QR)
-        versionName = "1.1"
+        versionCode = 3      // v1.2: kunci tanda tangan baru (lihat docs/KUNCI-TANDA-TANGAN.md)
+        versionName = "1.2"
     }
 
     signingConfigs {
         create("rilis") {
-            if (kunciRilis.exists()) {
+            if (kunciSiap) {
                 storeFile = kunciRilis
                 storeType = "PKCS12"
-                storePassword = "[DIHAPUS]"
-                keyAlias = "presensi"
-                keyPassword = "[DIHAPUS]"
+                storePassword = passKeystore
+                keyAlias = aliasKunci
+                keyPassword = passKunci
             }
         }
     }
@@ -34,7 +41,7 @@ android {
     buildTypes {
         release {
             isMinifyEnabled = false      // tanpa obfuscation agar mudah diaudit sekolah
-            if (kunciRilis.exists()) signingConfig = signingConfigs.getByName("rilis")
+            if (kunciSiap) signingConfig = signingConfigs.getByName("rilis")
         }
     }
 

@@ -48,6 +48,7 @@ Status per 19 November 2026. APK: Release `v1.0.2` (10,7 MB, Android 10+).
 
 - **Ketergantungan jaringan:** HP siswa harus satu jaringan dengan HP guru (hotspot guru paling andal).
   Bila Wi-Fi sekolah memakai *client isolation*, scan tidak akan sampai.
-- **Kunci tanda tangan** ada di repo (`app/keystore/presensi.p12.b64`). Simpan baik-baik: APK versi
-  berikutnya harus ditandatangani kunci yang sama agar bisa memperbarui aplikasi tanpa uninstall.
+- **Kunci tanda tangan** tidak lagi disimpan di repo; kini berupa GitHub Secrets
+  (lihat `docs/KUNCI-TANDA-TANGAN.md`). Kunci v1.0–v1.1 dinyatakan **bocor** dan diganti di v1.2,
+  sehingga pengguna versi lama harus uninstall sekali (ekspor CSV lebih dulu).
 - **Data hanya di HP guru.** Belum ada cadangan otomatis; ekspor CSV secara berkala disarankan.

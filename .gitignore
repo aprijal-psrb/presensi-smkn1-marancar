@@ -8,5 +8,10 @@ dist/
 build-log.txt
 err.txt
 
-# kunci tanda tangan hasil decode (yang di-commit hanya versi .b64)
-app/keystore/presensi.p12
+# ── Jangan pernah commit kunci tanda tangan atau password-nya ────────────────
+app/keystore/
+*.p12
+*.jks
+*.keystore
+keystore.properties
+*.b64
